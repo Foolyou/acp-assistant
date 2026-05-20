@@ -1,28 +1,35 @@
 ## ADDED Requirements
 
-### Requirement: Assistant owns a lightweight event index
-The system SHALL maintain a lightweight per-assistant SQLite event/index store.
+### Requirement: Event index records runtime facts
+The assistant-local SQLite event index SHALL record lifecycle, connector, session, prompt, ACP, permission, memory, error, and idempotency events.
 
-#### Scenario: Initialize event index
-- **WHEN** an assistant is created
-- **THEN** the system MUST initialize an event/index database in the assistant configspace
-- **AND** the database MUST be scoped to that assistant instance
+#### Scenario: Record inbound message
+- **WHEN** a connector delivers a normalized private message
+- **THEN** the system MUST record an inbound message summary and idempotency key
+- **AND** it MUST avoid storing full message content unless configured explicitly
 
-### Requirement: Event index records operational events
-The event index SHALL record assistant lifecycle events, channel events, session bindings, message summaries, memory revisions, harness lifecycle events, and runtime errors.
+#### Scenario: Record connector status
+- **WHEN** a connector account changes connection state
+- **THEN** the system MUST record platform, account id, state, timestamp, and error message when present
 
-#### Scenario: Record message summary
-- **WHEN** the runtime routes an inbound IM message to a session
-- **THEN** it MUST record a message summary event
-- **AND** it MUST avoid storing secrets or full message content unless configured explicitly
+#### Scenario: Record ACP event
+- **WHEN** the ACP runtime starts, initializes, fails, sends a prompt, receives an update, or closes
+- **THEN** the system MUST record the event with assistant id, harness provider, launch profile, session id when known, and timestamp
 
-#### Scenario: Record runtime error
-- **WHEN** an adapter or harness operation fails
-- **THEN** the runtime MUST record the error category, related assistant, related channel or session when known, and timestamp
+### Requirement: Event index supports status and logs commands
+The event index SHALL provide enough structured state to power `acpa channel status`, `acpa assistant inspect`, and `acpa logs --follow`.
 
-### Requirement: Event index supports future dashboard queries
-The event index SHALL expose enough structured state to support a future dashboard without making the dashboard part of the first implementation.
+#### Scenario: Query status
+- **WHEN** the CLI queries assistant status
+- **THEN** it MUST be able to derive last known assistant status, connector account status, active sessions, pending permissions, recent errors, and recent memory revisions
 
-#### Scenario: Query assistant status
-- **WHEN** a management surface queries assistant state
-- **THEN** it MUST be able to derive last known process status, channel status, active session bindings, recent errors, and recent memory revisions from configspace and the event index
+#### Scenario: Follow logs
+- **WHEN** the CLI follows logs
+- **THEN** it MUST stream new event records in timestamp order
+
+### Requirement: Event index supports future dashboard
+The event index SHALL preserve structured projections for a future dashboard without making the dashboard part of the first implementation.
+
+#### Scenario: Dashboard reads projections later
+- **WHEN** a future dashboard reads the assistant configspace and event index
+- **THEN** it MUST be able to discover configured channels, connector status, active user sessions, permission waits, recent failures, and memory revision history without parsing raw log text
