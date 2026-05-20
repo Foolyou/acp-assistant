@@ -1,0 +1,17 @@
+.codex
+.claude
+AGENTS.md
+CLAUDE.md
+
+# Local environment and editor state
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Runtime output
+*.log
+tmp/
+dist/
+build/
+node_modules/
