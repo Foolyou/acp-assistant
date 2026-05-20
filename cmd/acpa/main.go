@@ -1,0 +1,974 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/Foolyou/acp-assistant/internal/acp"
+	"github.com/Foolyou/acp-assistant/internal/assistant"
+	"github.com/Foolyou/acp-assistant/internal/configspace"
+	harnesspkg "github.com/Foolyou/acp-assistant/internal/harness"
+	"github.com/Foolyou/acp-assistant/internal/im"
+	"github.com/Foolyou/acp-assistant/internal/model"
+	"github.com/Foolyou/acp-assistant/internal/store"
+	"github.com/Foolyou/acp-assistant/internal/workspace"
+	qrcode "github.com/skip2/go-qrcode"
+	"gopkg.in/yaml.v3"
+)
+
+func main() {
+	if err := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, "acpa:", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		printUsage(stdout)
+		return nil
+	}
+	switch args[0] {
+	case "assistant":
+		return runAssistant(ctx, args[1:], stdin, stdout, stderr)
+	case "channel":
+		return runChannel(ctx, args[1:], stdin, stdout, stderr)
+	case "logs":
+		return runLogs(ctx, args[1:], stdout)
+	case "help", "-h", "--help":
+		printUsage(stdout)
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func runAssistant(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("assistant subcommand is required")
+	}
+	switch args[0] {
+	case "create":
+		return assistantCreate(ctx, args[1:], stdout)
+	case "list":
+		return assistantList(args[1:], stdout)
+	case "inspect":
+		return assistantInspect(ctx, args[1:], stdout)
+	case "start":
+		return assistantStart(args[1:], stdout, stderr)
+	case "serve":
+		return assistantServe(ctx, args[1:], stdout, stderr)
+	case "stop":
+		return assistantStop(args[1:], stdout)
+	case "remove":
+		return assistantRemove(args[1:], stdout)
+	default:
+		return fmt.Errorf("unknown assistant subcommand %q", args[0])
+	}
+}
+
+func runChannel(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("channel subcommand is required")
+	}
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			return fmt.Errorf("channel add requires platform feishu or qqbot")
+		}
+		return channelAdd(ctx, args[1], args[2:], stdin, stdout)
+	case "status":
+		return channelStatus(ctx, args[1:], stdout)
+	default:
+		return fmt.Errorf("unknown channel subcommand %q", args[0])
+	}
+}
+
+func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("assistant create", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "assistant name")
+	id := fs.String("id", "", "assistant id")
+	workspacePath := fs.String("workspace", "", "workspace path")
+	configDir := fs.String("configspace", "", "configspace path")
+	providerRaw := fs.String("harness", "codex", "harness provider: codex or claude")
+	command := fs.String("command", "", "ACP adapter command")
+	var adapterArgs multiFlag
+	fs.Var(&adapterArgs, "arg", "ACP adapter argument")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*name) == "" && strings.TrimSpace(*id) == "" {
+		return fmt.Errorf("--name or --id is required")
+	}
+	assistantID := strings.TrimSpace(*id)
+	if assistantID == "" {
+		assistantID = slug(*name)
+	}
+	if *name == "" {
+		*name = assistantID
+	}
+	cwd, _ := os.Getwd()
+	if *workspacePath == "" {
+		*workspacePath = filepath.Join(cwd, assistantID+"-workspace")
+	}
+	if *configDir == "" {
+		*configDir = filepath.Join(defaultHome(), "assistants", assistantID)
+	}
+	provider := model.HarnessProvider(*providerRaw)
+	defaultCommand, defaultArgs, err := harnesspkg.DefaultCommand(provider)
+	if err != nil {
+		return err
+	}
+	if *command == "" {
+		*command = defaultCommand
+	}
+	argsValue := []string(adapterArgs)
+	if len(argsValue) == 0 {
+		argsValue = defaultArgs
+	}
+	cfg := model.AssistantConfig{
+		ID:              assistantID,
+		Name:            *name,
+		WorkspacePath:   absPath(*workspacePath),
+		ConfigspacePath: absPath(*configDir),
+		Harness:         model.HarnessBinding{Provider: provider, Command: *command, Args: argsValue},
+		Memory:          model.DefaultMemoryConfig(),
+		EventDBPath:     filepath.Join(absPath(*configDir), configspace.EventsDBFile),
+	}
+	if err := configspace.Initialize(ctx, cfg); err != nil {
+		return err
+	}
+	if err := registerAssistant(cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "created assistant %s\nconfigspace: %s\nworkspace: %s\n", cfg.ID, cfg.ConfigspacePath, cfg.WorkspacePath)
+	return nil
+}
+
+func assistantList(args []string, stdout io.Writer) error {
+	registry, err := loadRegistry()
+	if err != nil {
+		return err
+	}
+	sort.Slice(registry.Assistants, func(i, j int) bool { return registry.Assistants[i].ID < registry.Assistants[j].ID })
+	fmt.Fprintln(stdout, "ID\tNAME\tCONFIGSPACE\tWORKSPACE")
+	for _, item := range registry.Assistants {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.ID, item.Name, item.ConfigspacePath, item.WorkspacePath)
+	}
+	return nil
+}
+
+func assistantInspect(ctx context.Context, args []string, stdout io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := configspace.LoadAssistant(configDir)
+	if err != nil {
+		return err
+	}
+	channels, err := configspace.LoadChannels(configDir)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.EventDBPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		return err
+	}
+	status, err := db.StatusSnapshot(ctx, cfg.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "id: %s\nname: %s\nharness: %s\nworkspace: %s\nconfigspace: %s\nchannels: %d\nactive_sessions: %d\npending_permissions: %d\n",
+		cfg.ID, cfg.Name, cfg.Harness.Provider, cfg.WorkspacePath, cfg.ConfigspacePath, len(channels), status.ActiveSessions, status.PendingPermissions)
+	return nil
+}
+
+func assistantStart(args []string, stdout, stderr io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	if hasArg(args, "--foreground") {
+		return assistantServe(context.Background(), []string{"--configspace", configDir}, stdout, stderr)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	outLog, err := os.OpenFile(filepath.Join(configDir, "acpa.out.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	errLog, err := os.OpenFile(filepath.Join(configDir, "acpa.err.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		_ = outLog.Close()
+		return err
+	}
+	cmd := exec.Command(exe, "assistant", "serve", "--configspace", configDir)
+	cmd.Stdout = outLog
+	cmd.Stderr = errLog
+	if err := cmd.Start(); err != nil {
+		_ = outLog.Close()
+		_ = errLog.Close()
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "assistant.pid"), []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "started assistant process pid=%d\n", cmd.Process.Pid)
+	return nil
+}
+
+func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := configspace.LoadAssistant(configDir)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.EventDBPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		return err
+	}
+	policies, err := configspace.LoadPolicies(configDir)
+	if err != nil {
+		return err
+	}
+	mem := workspace.NewMemoryManager(cfg.ID, cfg.WorkspacePath, cfg.Memory, db)
+	if err := mem.InitSkeletons(); err != nil {
+		return err
+	}
+	h := newRuntimeHarness(cfg, db)
+	sender := newConnectorSender()
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{AssistantID: cfg.ID, Provider: cfg.Harness.Provider, Store: db, Harness: h, Sender: sender, Policy: policies, Memory: mem})
+	h.onPermission = func(ctx context.Context, localSessionID, acpRequestID string, options []string) (model.PendingPermission, error) {
+		return rt.RecordPermissionRequest(ctx, assistant.PermissionRequest{LocalSessionID: localSessionID, ACPRequestID: acpRequestID, Options: options, TimeoutResolution: "reject"})
+	}
+	channels, err := configspace.LoadChannels(configDir)
+	if err != nil {
+		return err
+	}
+	var accounts []im.Account
+	for _, channel := range channels {
+		secrets, err := configspace.ResolveSecrets(channel.Credentials)
+		if err != nil {
+			_ = db.UpsertConnectorStatus(ctx, model.ConnectorStatus{AssistantID: cfg.ID, Platform: channel.Platform, AccountID: channel.AccountID, State: model.ConnectorStateFailed, LastError: err.Error(), UpdatedAt: time.Now().UTC()})
+			continue
+		}
+		accountCfg := im.AccountConfig{
+			AssistantID: cfg.ID,
+			Channel:     channel,
+			Secrets:     secrets,
+			OnInbound:   rt.HandleInbound,
+			OnStatus:    db.UpsertConnectorStatus,
+		}
+		var account im.Account
+		switch channel.Platform {
+		case model.PlatformFeishu:
+			account = im.NewFeishuAccount(accountCfg)
+		case model.PlatformQQBot:
+			account = im.NewQQBotAccount(accountCfg)
+		default:
+			continue
+		}
+		accounts = append(accounts, account)
+		if err := account.Start(ctx); err != nil {
+			_ = db.UpsertConnectorStatus(ctx, model.ConnectorStatus{AssistantID: cfg.ID, Platform: channel.Platform, AccountID: channel.AccountID, State: model.ConnectorStateFailed, LastError: err.Error(), UpdatedAt: time.Now().UTC()})
+		}
+		sender.Register(account)
+	}
+	_ = db.RecordEvent(ctx, model.Event{AssistantID: cfg.ID, Type: model.EventLifecycle, Scope: "assistant", Message: "started", At: time.Now().UTC()})
+	fmt.Fprintf(stdout, "assistant %s serving with %d connector account(s)\n", cfg.ID, len(accounts))
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	permissionTicker := time.NewTicker(30 * time.Second)
+	defer permissionTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-permissionTicker.C:
+				_ = rt.ExpirePermissions(context.Background(), time.Now().UTC())
+			}
+		}
+	}()
+	<-sigCtx.Done()
+	for _, account := range accounts {
+		_ = account.Stop(context.Background())
+	}
+	_ = h.Stop()
+	_ = db.RecordEvent(context.Background(), model.Event{AssistantID: cfg.ID, Type: model.EventLifecycle, Scope: "assistant", Message: "stopped", At: time.Now().UTC()})
+	return nil
+}
+
+func assistantStop(args []string, stdout io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	pidFile := filepath.Join(configDir, "assistant.pid")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return err
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	_ = os.Remove(pidFile)
+	fmt.Fprintf(stdout, "stopped assistant process pid=%d\n", pid)
+	return nil
+}
+
+func assistantRemove(args []string, stdout io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := configspace.LoadAssistant(configDir)
+	if err != nil {
+		return err
+	}
+	if err := unregisterAssistant(cfg.ID); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "removed assistant %s from registry; configspace left at %s\n", cfg.ID, cfg.ConfigspacePath)
+	return nil
+}
+
+func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io.Reader, stdout io.Writer) error {
+	platform := model.Platform(platformRaw)
+	if platform != model.PlatformFeishu && platform != model.PlatformQQBot {
+		return fmt.Errorf("unsupported platform %q", platformRaw)
+	}
+	fs := flag.NewFlagSet("channel add "+platformRaw, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	configDir := fs.String("configspace", "", "configspace path")
+	id := fs.String("id", "", "channel id")
+	accountID := fs.String("account-id", "main", "account id")
+	displayName := fs.String("name", "", "display name")
+	setupURL := fs.String("setup-url", "", "setup URL")
+	appIDEnv := fs.String("app-id-env", "", "app id env var")
+	appSecretEnv := fs.String("app-secret-env", "", "app secret env var")
+	appIDFile := fs.String("app-id-file", "", "app id file")
+	appSecretFile := fs.String("app-secret-file", "", "app secret file")
+	websocketURL := fs.String("websocket-url", "", "gateway websocket URL")
+	enabled := fs.Bool("enabled", true, "enable channel")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *configDir == "" {
+		return fmt.Errorf("--configspace is required")
+	}
+	reader := bufio.NewReader(stdin)
+	if *id == "" {
+		*id = promptDefault(reader, stdout, "channel id", string(platform)+"-"+*accountID)
+	}
+	if *displayName == "" {
+		*displayName = promptDefault(reader, stdout, "display name", *id)
+	}
+	credentials := map[string]model.SecretRef{}
+	if *appIDEnv != "" {
+		credentials["app_id"] = model.SecretRef{Type: model.SecretEnv, Name: *appIDEnv}
+	} else if *appIDFile != "" {
+		credentials["app_id"] = model.SecretRef{Type: model.SecretFile, Path: *appIDFile}
+	}
+	if *appSecretEnv != "" {
+		credentials["app_secret"] = model.SecretRef{Type: model.SecretEnv, Name: *appSecretEnv}
+	} else if *appSecretFile != "" {
+		credentials["app_secret"] = model.SecretRef{Type: model.SecretFile, Path: *appSecretFile}
+	}
+	if *websocketURL != "" {
+		secretPath := filepath.Join(*configDir, "secrets", *id+".websocket_url")
+		if err := os.MkdirAll(filepath.Dir(secretPath), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(secretPath, []byte(*websocketURL+"\n"), 0o600); err != nil {
+			return err
+		}
+		credentials["websocket_url"] = model.SecretRef{Type: model.SecretFile, Path: secretPath}
+	}
+	channel := model.ChannelConfig{
+		ID:               *id,
+		Platform:         platform,
+		AccountID:        *accountID,
+		DisplayName:      *displayName,
+		Enabled:          *enabled,
+		Credentials:      credentials,
+		SetupURL:         *setupURL,
+		RejectNonPrivate: true,
+		TextChunkLimit:   3500,
+		TokenCachePath:   filepath.Join(*configDir, "secrets", *id+".token"),
+	}
+	if err := configspace.SaveChannel(*configDir, channel); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "wrote %s channel %s\n", platform, channel.ID)
+	printOnboarding(platform, *setupURL, stdout)
+	_, _ = ctx, reader
+	return nil
+}
+
+func channelStatus(ctx context.Context, args []string, stdout io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := configspace.LoadAssistant(configDir)
+	if err != nil {
+		return err
+	}
+	channels, err := configspace.LoadChannels(configDir)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.EventDBPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		return err
+	}
+	statuses, err := db.ConnectorStatuses(ctx, cfg.ID)
+	if err != nil {
+		return err
+	}
+	statusByKey := map[string]model.ConnectorStatus{}
+	for _, status := range statuses {
+		statusByKey[string(status.Platform)+"/"+status.AccountID] = status
+	}
+	fmt.Fprintln(stdout, "PLATFORM\tACCOUNT\tENABLED\tSTATE\tERROR")
+	for _, channel := range channels {
+		status := statusByKey[string(channel.Platform)+"/"+channel.AccountID]
+		state := string(status.State)
+		if state == "" {
+			state = "unknown"
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%t\t%s\t%s\n", channel.Platform, channel.AccountID, channel.Enabled, state, status.LastError)
+	}
+	return nil
+}
+
+func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	follow := hasArg(args, "--follow")
+	cfg, err := configspace.LoadAssistant(configDir)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.EventDBPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		return err
+	}
+	var lastID int64
+	for {
+		events, err := db.EventsAfter(ctx, cfg.ID, lastID, 100)
+		if err != nil {
+			return err
+		}
+		for _, event := range events {
+			if event.ID > lastID {
+				lastID = event.ID
+			}
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", event.At.Format(time.RFC3339), event.Type, event.Scope, event.Message)
+		}
+		if !follow {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+type runtimeHarness struct {
+	cfg             model.AssistantConfig
+	store           *store.Store
+	mu              sync.Mutex
+	runtimes        map[string]*acp.Runtime
+	sessionProfiles map[string]harnesspkg.LaunchProfile
+	acpToLocal      map[string]string
+	permissionReply map[string]func(string) error
+	onPermission    func(context.Context, string, string, []string) (model.PendingPermission, error)
+}
+
+func newRuntimeHarness(cfg model.AssistantConfig, db *store.Store) *runtimeHarness {
+	return &runtimeHarness{
+		cfg:             cfg,
+		store:           db,
+		runtimes:        map[string]*acp.Runtime{},
+		sessionProfiles: map[string]harnesspkg.LaunchProfile{},
+		acpToLocal:      map[string]string{},
+		permissionReply: map[string]func(string) error{},
+	}
+}
+
+func (h *runtimeHarness) EnsureSession(ctx context.Context, req assistant.EnsureSessionRequest) (assistant.EnsureSessionResult, error) {
+	profile, err := harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, req.PermissionMode, harnesspkg.ProfileOptions{Command: h.cfg.Harness.Command, Args: h.cfg.Harness.Args})
+	if err != nil {
+		return assistant.EnsureSessionResult{}, err
+	}
+	h.mu.Lock()
+	h.sessionProfiles[req.LocalSessionID] = profile
+	h.mu.Unlock()
+	if req.CurrentACPSession != "" {
+		h.rememberACPSession(req.CurrentACPSession, req.LocalSessionID)
+		return assistant.EnsureSessionResult{ACPSessionID: req.CurrentACPSession, ExternalSessionID: req.ExternalSessionID}, nil
+	}
+	runtime, err := h.runtime(ctx, profile)
+	if err != nil {
+		return assistant.EnsureSessionResult{}, err
+	}
+	sessionID, err := runtime.NewSession(ctx)
+	if err != nil {
+		return assistant.EnsureSessionResult{}, err
+	}
+	h.rememberACPSession(sessionID, req.LocalSessionID)
+	return assistant.EnsureSessionResult{ACPSessionID: sessionID, ExternalSessionID: sessionID}, nil
+}
+
+func (h *runtimeHarness) Prompt(ctx context.Context, req assistant.PromptRequest) (assistant.PromptResult, error) {
+	h.mu.Lock()
+	profile, ok := h.sessionProfiles[req.LocalSessionID]
+	h.mu.Unlock()
+	if !ok {
+		var err error
+		profile, err = harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, model.PermissionManual, harnesspkg.ProfileOptions{Command: h.cfg.Harness.Command, Args: h.cfg.Harness.Args})
+		if err != nil {
+			return assistant.PromptResult{}, err
+		}
+	}
+	runtime, err := h.runtime(ctx, profile)
+	if err != nil {
+		return assistant.PromptResult{}, err
+	}
+	if err := runtime.Prompt(ctx, req.ACPSessionID, req.Text); err != nil {
+		return assistant.PromptResult{}, err
+	}
+	return assistant.PromptResult{}, nil
+}
+
+func (h *runtimeHarness) SwitchMode(ctx context.Context, req assistant.SwitchModeRequest) (assistant.SwitchModeResult, error) {
+	profile, err := harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, req.Mode, harnesspkg.ProfileOptions{Command: h.cfg.Harness.Command, Args: h.cfg.Harness.Args})
+	if err != nil {
+		return assistant.SwitchModeResult{}, err
+	}
+	h.mu.Lock()
+	h.sessionProfiles[req.LocalSessionID] = profile
+	h.mu.Unlock()
+	runtime, err := h.runtime(ctx, profile)
+	if err != nil {
+		return assistant.SwitchModeResult{}, err
+	}
+	sessionID := req.ExternalSessionID
+	if sessionID != "" && runtime.Capabilities().Session.LoadSession {
+		loaded, err := runtime.LoadSession(ctx, sessionID)
+		if err == nil {
+			h.rememberACPSession(loaded, req.LocalSessionID)
+			return assistant.SwitchModeResult{ACPSessionID: loaded, LaunchProfileKey: profile.Key}, nil
+		}
+	}
+	created, err := runtime.NewSession(ctx)
+	if err != nil {
+		return assistant.SwitchModeResult{}, err
+	}
+	h.rememberACPSession(created, req.LocalSessionID)
+	return assistant.SwitchModeResult{ACPSessionID: created, LaunchProfileKey: profile.Key}, nil
+}
+
+func (h *runtimeHarness) ResolvePermission(ctx context.Context, shortID, option string) error {
+	h.mu.Lock()
+	reply := h.permissionReply[strings.ToUpper(shortID)]
+	delete(h.permissionReply, strings.ToUpper(shortID))
+	h.mu.Unlock()
+	if reply == nil {
+		return nil
+	}
+	if option == "reject" {
+		return reply("reject")
+	}
+	return reply(option)
+}
+
+func (h *runtimeHarness) Stop() error {
+	for _, runtime := range h.runtimes {
+		runtime.Stop()
+	}
+	return nil
+}
+
+func (h *runtimeHarness) runtime(ctx context.Context, profile harnesspkg.LaunchProfile) (*acp.Runtime, error) {
+	h.mu.Lock()
+	runtime := h.runtimes[profile.Key]
+	if runtime == nil {
+		runtime = acp.NewRuntime(acp.Config{
+			Command:   profile.Command,
+			Args:      profile.Args,
+			Workspace: h.cfg.WorkspacePath,
+			OnEvent:   h.handleACPEvent,
+			OnRequest: h.handleACPRequest,
+		})
+		h.runtimes[profile.Key] = runtime
+	}
+	h.mu.Unlock()
+	if err := runtime.Start(ctx); err != nil {
+		return nil, err
+	}
+	return runtime, nil
+}
+
+func (h *runtimeHarness) rememberACPSession(acpSessionID, localSessionID string) {
+	if acpSessionID == "" || localSessionID == "" {
+		return
+	}
+	h.mu.Lock()
+	h.acpToLocal[acpSessionID] = localSessionID
+	h.mu.Unlock()
+}
+
+func (h *runtimeHarness) handleACPEvent(event acp.Event) {
+	if h.store == nil {
+		return
+	}
+	_ = h.store.RecordEvent(context.Background(), model.Event{
+		AssistantID: h.cfg.ID,
+		Type:        model.EventACP,
+		Scope:       event.Method,
+		Message:     event.Method,
+		At:          time.Now().UTC(),
+	})
+}
+
+func (h *runtimeHarness) handleACPRequest(req acp.Request) bool {
+	if req.Method != "session/request_permission" {
+		h.handleACPEvent(acp.Event{Method: req.Method, Params: req.Params})
+		return false
+	}
+	var payload struct {
+		SessionID string `json:"sessionId"`
+		Options   []struct {
+			ID       string `json:"id"`
+			OptionID string `json:"optionId"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(req.Params, &payload); err != nil {
+		_ = req.Respond(cancelledPermissionResponse())
+		return true
+	}
+	h.mu.Lock()
+	localSessionID := h.acpToLocal[payload.SessionID]
+	h.mu.Unlock()
+	if localSessionID == "" || h.onPermission == nil {
+		_ = req.Respond(cancelledPermissionResponse())
+		return true
+	}
+	options := make([]string, 0, len(payload.Options))
+	for _, option := range payload.Options {
+		id := option.ID
+		if id == "" {
+			id = option.OptionID
+		}
+		if id != "" {
+			options = append(options, id)
+		}
+	}
+	permission, err := h.onPermission(context.Background(), localSessionID, req.ID, options)
+	if err != nil {
+		_ = req.Respond(cancelledPermissionResponse())
+		return true
+	}
+	h.mu.Lock()
+	h.permissionReply[strings.ToUpper(permission.ShortApprovalID)] = func(option string) error {
+		return req.Respond(selectedPermissionResponse(option))
+	}
+	h.mu.Unlock()
+	return true
+}
+
+func selectedPermissionResponse(optionID string) map[string]any {
+	return map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optionID}}
+}
+
+func cancelledPermissionResponse() map[string]any {
+	return map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}
+}
+
+type connectorSender struct {
+	mu       sync.Mutex
+	accounts map[string]im.Account
+}
+
+func newConnectorSender() *connectorSender {
+	return &connectorSender{accounts: map[string]im.Account{}}
+}
+
+func (s *connectorSender) Register(account im.Account) {
+	status := account.Status()
+	key := string(status.Platform) + "/" + status.AccountID
+	s.mu.Lock()
+	s.accounts[key] = account
+	s.mu.Unlock()
+}
+
+func (s *connectorSender) Send(ctx context.Context, msg model.OutboundMessage) error {
+	key := string(msg.Platform) + "/" + msg.AccountID
+	s.mu.Lock()
+	account := s.accounts[key]
+	s.mu.Unlock()
+	if account == nil {
+		return fmt.Errorf("connector account %s is not registered", key)
+	}
+	return account.Send(ctx, msg)
+}
+
+type multiFlag []string
+
+func (m *multiFlag) String() string {
+	return strings.Join(*m, ",")
+}
+
+func (m *multiFlag) Set(value string) error {
+	*m = append(*m, value)
+	return nil
+}
+
+type registry struct {
+	Assistants []registryEntry `yaml:"assistants"`
+}
+
+type registryEntry struct {
+	ID              string `yaml:"id"`
+	Name            string `yaml:"name"`
+	ConfigspacePath string `yaml:"configspace_path"`
+	WorkspacePath   string `yaml:"workspace_path"`
+	CreatedAt       string `yaml:"created_at"`
+}
+
+func registerAssistant(cfg model.AssistantConfig) error {
+	reg, err := loadRegistry()
+	if err != nil {
+		return err
+	}
+	entry := registryEntry{ID: cfg.ID, Name: cfg.Name, ConfigspacePath: cfg.ConfigspacePath, WorkspacePath: cfg.WorkspacePath, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	replaced := false
+	for i := range reg.Assistants {
+		if reg.Assistants[i].ID == cfg.ID {
+			reg.Assistants[i] = entry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		reg.Assistants = append(reg.Assistants, entry)
+	}
+	return saveRegistry(reg)
+}
+
+func unregisterAssistant(id string) error {
+	reg, err := loadRegistry()
+	if err != nil {
+		return err
+	}
+	var next []registryEntry
+	for _, entry := range reg.Assistants {
+		if entry.ID != id {
+			next = append(next, entry)
+		}
+	}
+	reg.Assistants = next
+	return saveRegistry(reg)
+}
+
+func loadRegistry() (registry, error) {
+	path := registryPath()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return registry{}, nil
+	}
+	if err != nil {
+		return registry{}, err
+	}
+	var reg registry
+	if err := yaml.Unmarshal(data, &reg); err != nil {
+		return registry{}, err
+	}
+	return reg, nil
+}
+
+func saveRegistry(reg registry) error {
+	data, err := yaml.Marshal(reg)
+	if err != nil {
+		return err
+	}
+	path := registryPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func resolveConfigspace(args []string) (string, error) {
+	for i, arg := range args {
+		if arg == "--configspace" && i+1 < len(args) {
+			return absPath(args[i+1]), nil
+		}
+		if strings.HasPrefix(arg, "--configspace=") {
+			return absPath(strings.TrimPrefix(arg, "--configspace=")), nil
+		}
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		reg, err := loadRegistry()
+		if err != nil {
+			return "", err
+		}
+		for _, entry := range reg.Assistants {
+			if entry.ID == arg || entry.Name == arg {
+				return entry.ConfigspacePath, nil
+			}
+		}
+		if _, err := os.Stat(filepath.Join(arg, configspace.AssistantFile)); err == nil {
+			return absPath(arg), nil
+		}
+	}
+	return "", fmt.Errorf("--configspace or assistant id is required")
+}
+
+func hasArg(args []string, target string) bool {
+	for _, arg := range args {
+		if arg == target {
+			return true
+		}
+	}
+	return false
+}
+
+func promptDefault(reader *bufio.Reader, stdout io.Writer, label, fallback string) string {
+	fmt.Fprintf(stdout, "%s [%s]: ", label, fallback)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return fallback
+	}
+	return line
+}
+
+func printOnboarding(platform model.Platform, setupURL string, stdout io.Writer) {
+	switch platform {
+	case model.PlatformFeishu:
+		fmt.Fprintln(stdout, "Feishu setup: enable bot private messages, event subscription, and app credentials in Feishu Open Platform.")
+	case model.PlatformQQBot:
+		fmt.Fprintln(stdout, "QQ Bot setup: enable C2C messaging and gateway intents in QQ Bot management console.")
+	}
+	if setupURL == "" {
+		fmt.Fprintln(stdout, "manual credential fallback: provide app_id and app_secret as env or file secret references.")
+		return
+	}
+	fmt.Fprintln(stdout, setupURL)
+	if code, err := qrcode.New(setupURL, qrcode.Medium); err == nil {
+		fmt.Fprintln(stdout, code.ToString(false))
+	}
+}
+
+func printUsage(stdout io.Writer) {
+	fmt.Fprintln(stdout, `Usage:
+  acpa assistant create --name NAME --workspace PATH --configspace PATH --harness codex|claude
+  acpa assistant list
+  acpa assistant inspect <assistant-id|--configspace PATH>
+  acpa assistant start <assistant-id|--configspace PATH> [--foreground]
+  acpa assistant stop <assistant-id|--configspace PATH>
+  acpa channel add feishu|qqbot --configspace PATH [credential flags]
+  acpa channel status <assistant-id|--configspace PATH>
+  acpa logs <assistant-id|--configspace PATH> [--follow]`)
+}
+
+func slug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func defaultHome() string {
+	if home := os.Getenv("ACPA_HOME"); home != "" {
+		return home
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return ".acpa"
+	}
+	return filepath.Join(userHome, ".acpa")
+}
+
+func registryPath() string {
+	return filepath.Join(defaultHome(), "assistants.yaml")
+}
+
+func absPath(path string) string {
+	if path == "" {
+		return path
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
