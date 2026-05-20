@@ -435,18 +435,6 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 		options["owner_open_id"] = result.OpenID
 		options["bot_open_id"] = result.BotOpenID
 		options["bot_name"] = result.BotName
-		if result.EventSubscriptionReady {
-			options["message_event_subscription"] = "ready"
-		} else if len(result.EventSubscription.MissingEvents) > 0 {
-			options["message_event_subscription"] = "missing"
-			options["missing_message_events"] = strings.Join(result.EventSubscription.MissingEvents, ",")
-		}
-		if result.EventSubscription.ConfigURL != "" {
-			options["event_config_url"] = result.EventSubscription.ConfigURL
-		}
-		if result.EventSubscription.PermissionURL != "" {
-			options["event_permission_url"] = result.EventSubscription.PermissionURL
-		}
 	} else if *appIDEnv != "" {
 		credentials["app_id"] = model.SecretRef{Type: model.SecretEnv, Name: *appIDEnv}
 	} else if *appIDFile != "" {
@@ -514,20 +502,6 @@ func runFeishuQRRegistration(ctx context.Context, domain, registrationBaseURL, o
 	fmt.Fprintf(stdout, "Feishu app registered: %s\n", result.AppID)
 	if result.BotName != "" {
 		fmt.Fprintf(stdout, "Bot: %s\n", result.BotName)
-	}
-	if result.EventSubscriptionReady {
-		fmt.Fprintln(stdout, "Message event subscription: ready")
-	} else if len(result.EventSubscription.MissingEvents) > 0 {
-		fmt.Fprintf(stdout, "Message event subscription: missing %s\n", strings.Join(result.EventSubscription.MissingEvents, ", "))
-		if result.EventSubscription.ConfigURL != "" {
-			fmt.Fprintf(stdout, "Feishu app config: %s\n", result.EventSubscription.ConfigURL)
-		}
-		if result.EventSubscription.PermissionURL != "" {
-			fmt.Fprintf(stdout, "Feishu permission URL: %s\n", result.EventSubscription.PermissionURL)
-		}
-		if result.EventSubscription.LastError != "" {
-			fmt.Fprintf(stdout, "Reason: %s\n", result.EventSubscription.LastError)
-		}
 	}
 	return result, nil
 }

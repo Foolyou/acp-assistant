@@ -102,10 +102,6 @@ func (c FeishuRegistrationClient) Poll(ctx context.Context, begin FeishuRegistra
 		result.BotName = bot.BotName
 		result.BotOpenID = bot.BotOpenID
 	}
-	if status, err := c.EnsureMessageEventSubscription(ctx, result.AppID, result.AppSecret, result.Domain); err == nil {
-		result.EventSubscription = status
-		result.EventSubscriptionReady = status.Ready
-	}
 	return result, nil
 }
 

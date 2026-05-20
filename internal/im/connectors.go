@@ -20,6 +20,7 @@ import (
 	larkchannel "github.com/larksuite/oapi-sdk-go/v3/channel"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
@@ -74,6 +75,19 @@ type feishuLongConnectionConfig struct {
 	HTTPClient   *http.Client
 }
 
+var newFeishuWSClient = func(cfg feishuLongConnectionConfig, openBaseURL string) *larkws.Client {
+	dispatcher := larkdispatcher.NewEventDispatcher("", "")
+	return larkws.NewClient(
+		cfg.AppID,
+		cfg.AppSecret,
+		larkws.WithDomain(openBaseURL),
+		larkws.WithEventHandler(dispatcher),
+		larkws.WithAutoReconnect(true),
+		larkws.WithLogLevel(larkcore.LogLevelError),
+		larkws.WithLogger(noopLarkLogger{}),
+	)
+}
+
 var newFeishuLongConnection = func(cfg feishuLongConnectionConfig) (feishuLongConnection, error) {
 	openBaseURL := feishuOpenBaseURL(cfg.Domain, cfg.OpenBaseURL)
 	clientOptions := []lark.ClientOptionFunc{
@@ -86,14 +100,7 @@ var newFeishuLongConnection = func(cfg feishuLongConnectionConfig) (feishuLongCo
 		clientOptions = append(clientOptions, lark.WithHttpClient(cfg.HTTPClient))
 	}
 	client := lark.NewClient(cfg.AppID, cfg.AppSecret, clientOptions...)
-	wsClient := larkws.NewClient(
-		cfg.AppID,
-		cfg.AppSecret,
-		larkws.WithDomain(openBaseURL),
-		larkws.WithAutoReconnect(true),
-		larkws.WithLogLevel(larkcore.LogLevelError),
-		larkws.WithLogger(noopLarkLogger{}),
-	)
+	wsClient := newFeishuWSClient(cfg, openBaseURL)
 	return larkchannel.NewChannel(client, wsClient), nil
 }
 

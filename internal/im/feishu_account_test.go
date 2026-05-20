@@ -101,6 +101,17 @@ func TestFeishuAccountStartUsesSDKLongConnectionWithoutWebsocketURL(t *testing.T
 	}
 }
 
+func TestFeishuWSClientInstallsEventDispatcher(t *testing.T) {
+	wsClient := newFeishuWSClient(feishuLongConnectionConfig{
+		AppID:     "cli_test",
+		AppSecret: "secret_test",
+		Domain:    "feishu",
+	}, "https://open.feishu.cn")
+	if wsClient.EventHandler() == nil {
+		t.Fatal("expected Feishu WebSocket client to have an event dispatcher")
+	}
+}
+
 func hasConnectorState(statuses []model.ConnectorStatus, state model.ConnectorState) bool {
 	for _, status := range statuses {
 		if status.State == state {

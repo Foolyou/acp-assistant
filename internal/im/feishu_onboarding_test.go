@@ -53,39 +53,6 @@ func TestFeishuRegistrationFlowCreatesCredentialsAndProbesBot(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "bot": map[string]string{"app_name": "Live Bot", "open_id": "ou_bot"}})
 	})
-	patchCalled := false
-	mux.HandleFunc("/open-apis/application/v6/applications/cli_test", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tenant-token" {
-			t.Fatalf("missing tenant token for app config: %s", r.Header.Get("Authorization"))
-		}
-		switch r.Method {
-		case http.MethodGet:
-			subscribed := []string{"card.action.trigger"}
-			if patchCalled {
-				subscribed = append(subscribed, "im.message.receive_v1")
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"code": 0,
-				"data": map[string]any{"app": map[string]any{
-					"callback_info": map[string]any{"callback_type": "websocket", "subscribed_callbacks": subscribed},
-					"event":         map[string]any{"subscription_type": "websocket", "subscribed_events": subscribed},
-				}},
-			})
-		case http.MethodPatch:
-			var payload map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				t.Fatal(err)
-			}
-			event, _ := payload["event"].(map[string]any)
-			if event["subscription_type"] != "websocket" {
-				t.Fatalf("expected websocket event subscription: %#v", payload)
-			}
-			patchCalled = true
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "ok"})
-		default:
-			t.Fatalf("unexpected app config method %s", r.Method)
-		}
-	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -109,9 +76,6 @@ func TestFeishuRegistrationFlowCreatesCredentialsAndProbesBot(t *testing.T) {
 	}
 	if !strings.Contains(result.QRURL, "from=hermes") || !strings.Contains(result.QRURL, "tp=hermes") {
 		t.Fatalf("expected Hermes-compatible onboarding URL, got %q", result.QRURL)
-	}
-	if !result.EventSubscriptionReady || !patchCalled {
-		t.Fatalf("expected message event subscription to be configured: %#v patch=%t", result.EventSubscription, patchCalled)
 	}
 }
 
