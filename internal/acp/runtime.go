@@ -59,14 +59,13 @@ type Request struct {
 }
 
 type Runtime struct {
-	cfg      Config
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	pending  map[string]chan rpcResponse
-	nextID   atomic.Int64
-	caps     Capabilities
-	mu       sync.Mutex
-	readDone chan struct{}
+	cfg     Config
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	pending map[string]chan rpcResponse
+	nextID  atomic.Int64
+	caps    Capabilities
+	mu      sync.Mutex
 }
 
 type rpcResponse struct {
@@ -80,7 +79,7 @@ type rpcError struct {
 }
 
 func NewRuntime(cfg Config) *Runtime {
-	return &Runtime{cfg: cfg, pending: map[string]chan rpcResponse{}, readDone: make(chan struct{})}
+	return &Runtime{cfg: cfg, pending: map[string]chan rpcResponse{}}
 }
 
 func (r *Runtime) Start(ctx context.Context) error {
@@ -263,7 +262,6 @@ func (r *Runtime) request(ctx context.Context, method string, params any, target
 }
 
 func (r *Runtime) readLoop(stdout io.Reader) {
-	defer close(r.readDone)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	for scanner.Scan() {

@@ -63,17 +63,17 @@ func codexProfile(mode model.PermissionMode, options ProfileOptions) (LaunchProf
 	args := append([]string{}, options.Args...)
 	switch mode {
 	case model.PermissionFullAuto:
-		args = append(args, "--permission-mode", "full-auto")
+		args = append(args, "-c", `approval_policy="never"`, "-c", `sandbox_mode="workspace-write"`)
 	case model.PermissionYolo:
-		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+		args = append(args, "-c", `approval_policy="never"`, "-c", `sandbox_mode="danger-full-access"`)
 	default:
-		args = append(args, "--permission-mode", "manual")
+		args = append(args, "-c", `approval_policy="on-request"`, "-c", `sandbox_mode="workspace-write"`)
 	}
 	if strings.TrimSpace(options.ReasoningEffort) != "" {
-		args = append(args, "--model-reasoning-effort", options.ReasoningEffort)
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", options.ReasoningEffort))
 	}
 	if strings.TrimSpace(options.ResponseMode) != "" {
-		args = append(args, "--response-mode", options.ResponseMode)
+		args = append(args, "-c", fmt.Sprintf("response_mode=%q", options.ResponseMode))
 	}
 	return LaunchProfile{Provider: model.ProviderCodex, Key: string(mode), PermissionMode: mode, Command: command, Args: args}, nil
 }
