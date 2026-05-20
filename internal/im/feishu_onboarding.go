@@ -14,6 +14,8 @@ import (
 
 const feishuRegistrationPath = "/oauth/v1/app/registration"
 
+var requiredFeishuMessageEvents = []string{"im.message.receive_v1"}
+
 type FeishuRegistrationOptions struct {
 	Domain         string
 	TimeoutSeconds int
@@ -39,6 +41,18 @@ type FeishuRegistrationResult struct {
 	QRURL      string
 	Interval   int
 	ExpireIn   int
+
+	EventSubscription      FeishuEventSubscriptionStatus
+	EventSubscriptionReady bool
+}
+
+type FeishuEventSubscriptionStatus struct {
+	Ready            bool
+	SubscribedEvents []string
+	MissingEvents    []string
+	ConfigURL        string
+	PermissionURL    string
+	LastError        string
 }
 
 func (c FeishuRegistrationClient) Register(ctx context.Context, opts FeishuRegistrationOptions) (FeishuRegistrationResult, error) {
@@ -87,48 +101,30 @@ func (c FeishuRegistrationClient) Poll(ctx context.Context, begin FeishuRegistra
 		result.BotName = bot.BotName
 		result.BotOpenID = bot.BotOpenID
 	}
+	if status, err := c.EnsureMessageEventSubscription(ctx, result.AppID, result.AppSecret, result.Domain); err == nil {
+		result.EventSubscription = status
+		result.EventSubscriptionReady = status.Ready
+	}
 	return result, nil
 }
 
 func (c FeishuRegistrationClient) ProbeBot(ctx context.Context, appID, appSecret, domain string) (FeishuRegistrationResult, error) {
 	base := c.openBaseURL(domain)
-	tokenBody, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/open-apis/auth/v3/tenant_access_token/internal", bytes.NewReader(tokenBody))
+	tenantAccessToken, err := c.tenantAccessToken(ctx, appID, appSecret, domain)
 	if err != nil {
 		return FeishuRegistrationResult{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/open-apis/bot/v3/info", nil)
+	if err != nil {
+		return FeishuRegistrationResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tenantAccessToken)
 	resp, err := httpClient(c.HTTPClient).Do(req)
 	if err != nil {
 		return FeishuRegistrationResult{}, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if resp.StatusCode >= 300 {
-		return FeishuRegistrationResult{}, fmt.Errorf("tenant token request failed: %s", strings.TrimSpace(string(data)))
-	}
-	var tokenRes struct {
-		Code              int    `json:"code"`
-		Msg               string `json:"msg"`
-		TenantAccessToken string `json:"tenant_access_token"`
-	}
-	if err := json.Unmarshal(data, &tokenRes); err != nil {
-		return FeishuRegistrationResult{}, err
-	}
-	if tokenRes.Code != 0 || tokenRes.TenantAccessToken == "" {
-		return FeishuRegistrationResult{}, fmt.Errorf("tenant token request failed: %s", tokenRes.Msg)
-	}
-	req, err = http.NewRequestWithContext(ctx, http.MethodGet, base+"/open-apis/bot/v3/info", nil)
-	if err != nil {
-		return FeishuRegistrationResult{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+tokenRes.TenantAccessToken)
-	resp, err = httpClient(c.HTTPClient).Do(req)
-	if err != nil {
-		return FeishuRegistrationResult{}, err
-	}
-	defer resp.Body.Close()
-	data, _ = io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if resp.StatusCode >= 300 {
 		return FeishuRegistrationResult{}, fmt.Errorf("bot info request failed: %s", strings.TrimSpace(string(data)))
 	}
@@ -169,6 +165,134 @@ func (c FeishuRegistrationClient) ProbeBot(ctx context.Context, appID, appSecret
 		openID = botRes.Data.Bot.OpenID
 	}
 	return FeishuRegistrationResult{BotName: name, BotOpenID: openID}, nil
+}
+
+func (c FeishuRegistrationClient) EnsureMessageEventSubscription(ctx context.Context, appID, appSecret, domain string) (FeishuEventSubscriptionStatus, error) {
+	status := FeishuEventSubscriptionStatus{
+		ConfigURL:     c.appConfigURL(appID, domain),
+		PermissionURL: c.appPermissionURL(appID, domain),
+	}
+	token, err := c.tenantAccessToken(ctx, appID, appSecret, domain)
+	if err != nil {
+		return status, err
+	}
+	status, err = c.fetchEventSubscriptionStatus(ctx, appID, token, domain)
+	if err != nil {
+		return status, err
+	}
+	if status.Ready {
+		return status, nil
+	}
+	payload := map[string]any{
+		"event": map[string]any{
+			"subscription_type": "websocket",
+			"add_events":        status.MissingEvents,
+		},
+	}
+	resp, err := c.doOpenAPIJSON(ctx, http.MethodPatch, domain, "/open-apis/application/v6/applications/"+url.PathEscape(appID)+"?lang=zh_cn", token, payload)
+	if err != nil {
+		status.LastError = err.Error()
+		return status, nil
+	}
+	if code := intValue(resp["code"], 0); code != 0 {
+		status.LastError = stringValue(resp["msg"])
+		if status.LastError == "" {
+			status.LastError = fmt.Sprintf("Feishu app event subscription update failed: code %d", code)
+		}
+		if permissionURL := firstURL(status.LastError); permissionURL != "" {
+			status.PermissionURL = permissionURL
+		}
+		return status, nil
+	}
+	return c.fetchEventSubscriptionStatus(ctx, appID, token, domain)
+}
+
+func (c FeishuRegistrationClient) fetchEventSubscriptionStatus(ctx context.Context, appID, token, domain string) (FeishuEventSubscriptionStatus, error) {
+	status := FeishuEventSubscriptionStatus{
+		ConfigURL:     c.appConfigURL(appID, domain),
+		PermissionURL: c.appPermissionURL(appID, domain),
+	}
+	resp, err := c.doOpenAPIJSON(ctx, http.MethodGet, domain, "/open-apis/application/v6/applications/"+url.PathEscape(appID)+"?lang=zh_cn", token, nil)
+	if err != nil {
+		return status, err
+	}
+	if code := intValue(resp["code"], 0); code != 0 {
+		msg := stringValue(resp["msg"])
+		if msg == "" {
+			msg = fmt.Sprintf("Feishu app info request failed: code %d", code)
+		}
+		return status, fmt.Errorf("%s", msg)
+	}
+	data, _ := resp["data"].(map[string]any)
+	app, _ := data["app"].(map[string]any)
+	event, _ := app["event"].(map[string]any)
+	callbackInfo, _ := app["callback_info"].(map[string]any)
+	events := uniqueStrings(stringSlice(event["subscribed_events"]), stringSlice(callbackInfo["subscribed_callbacks"]))
+	status.SubscribedEvents = events
+	status.MissingEvents = missingStrings(requiredFeishuMessageEvents, events)
+	status.Ready = len(status.MissingEvents) == 0
+	return status, nil
+}
+
+func (c FeishuRegistrationClient) tenantAccessToken(ctx context.Context, appID, appSecret, domain string) (string, error) {
+	base := c.openBaseURL(domain)
+	tokenBody, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/open-apis/auth/v3/tenant_access_token/internal", bytes.NewReader(tokenBody))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient(c.HTTPClient).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("tenant token request failed: %s", strings.TrimSpace(string(data)))
+	}
+	var tokenRes struct {
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.Unmarshal(data, &tokenRes); err != nil {
+		return "", err
+	}
+	if tokenRes.Code != 0 || tokenRes.TenantAccessToken == "" {
+		return "", fmt.Errorf("tenant token request failed: %s", tokenRes.Msg)
+	}
+	return tokenRes.TenantAccessToken, nil
+}
+
+func (c FeishuRegistrationClient) doOpenAPIJSON(ctx context.Context, method, domain, path, token string, payload any) (map[string]any, error) {
+	var body io.Reader
+	if payload != nil {
+		data, _ := json.Marshal(payload)
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.openBaseURL(domain)+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := httpClient(c.HTTPClient).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 500 {
+		return parsed, fmt.Errorf("Feishu OpenAPI request failed: %s", strings.TrimSpace(string(data)))
+	}
+	return parsed, nil
 }
 
 func (c FeishuRegistrationClient) init(ctx context.Context, domain string) error {
@@ -307,6 +431,14 @@ func (c FeishuRegistrationClient) openBaseURL(domain string) string {
 	return "https://open.feishu.cn"
 }
 
+func (c FeishuRegistrationClient) appConfigURL(appID, domain string) string {
+	return c.openBaseURL(domain) + "/app/" + url.PathEscape(appID)
+}
+
+func (c FeishuRegistrationClient) appPermissionURL(appID, domain string) string {
+	return c.openBaseURL(domain) + "/app/" + url.PathEscape(appID) + "/auth"
+}
+
 func intValue(value any, fallback int) int {
 	switch typed := value.(type) {
 	case float64:
@@ -321,6 +453,62 @@ func intValue(value any, fallback int) int {
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func stringSlice(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok && text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
+}
+
+func uniqueStrings(groups ...[]string) []string {
+	seen := map[string]bool{}
+	unique := []string{}
+	for _, group := range groups {
+		for _, value := range group {
+			if value == "" || seen[value] {
+				continue
+			}
+			seen[value] = true
+			unique = append(unique, value)
+		}
+	}
+	return unique
+}
+
+func missingStrings(required, actual []string) []string {
+	have := map[string]bool{}
+	for _, value := range actual {
+		have[value] = true
+	}
+	missing := []string{}
+	for _, value := range required {
+		if !have[value] {
+			missing = append(missing, value)
+		}
+	}
+	return missing
+}
+
+func firstURL(text string) string {
+	for _, field := range strings.Fields(text) {
+		field = strings.Trim(field, `"'()[]{}<>.,;`)
+		if strings.HasPrefix(field, "https://") || strings.HasPrefix(field, "http://") {
+			return field
+		}
+	}
+	return ""
 }
 
 func minInt(a, b int) int {

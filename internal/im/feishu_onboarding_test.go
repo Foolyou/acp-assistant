@@ -52,6 +52,39 @@ func TestFeishuRegistrationFlowCreatesCredentialsAndProbesBot(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "bot": map[string]string{"app_name": "Live Bot", "open_id": "ou_bot"}})
 	})
+	patchCalled := false
+	mux.HandleFunc("/open-apis/application/v6/applications/cli_test", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tenant-token" {
+			t.Fatalf("missing tenant token for app config: %s", r.Header.Get("Authorization"))
+		}
+		switch r.Method {
+		case http.MethodGet:
+			subscribed := []string{"card.action.trigger"}
+			if patchCalled {
+				subscribed = append(subscribed, "im.message.receive_v1")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{"app": map[string]any{
+					"callback_info": map[string]any{"callback_type": "websocket", "subscribed_callbacks": subscribed},
+					"event":         map[string]any{"subscription_type": "websocket", "subscribed_events": subscribed},
+				}},
+			})
+		case http.MethodPatch:
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			event, _ := payload["event"].(map[string]any)
+			if event["subscription_type"] != "websocket" {
+				t.Fatalf("expected websocket event subscription: %#v", payload)
+			}
+			patchCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "ok"})
+		default:
+			t.Fatalf("unexpected app config method %s", r.Method)
+		}
+	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -72,5 +105,51 @@ func TestFeishuRegistrationFlowCreatesCredentialsAndProbesBot(t *testing.T) {
 	}
 	if result.QRURL == "" || result.UserCode != "ABCD-EFGH" {
 		t.Fatalf("missing QR registration metadata: %#v", result)
+	}
+	if !result.EventSubscriptionReady || !patchCalled {
+		t.Fatalf("expected message event subscription to be configured: %#v patch=%t", result.EventSubscription, patchCalled)
+	}
+}
+
+func TestFeishuRegistrationReportsMissingMessageEventWhenAppConfigPatchIsDenied(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/open-apis/auth/v3/tenant_access_token/internal", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "tenant_access_token": "tenant-token"})
+	})
+	mux.HandleFunc("/open-apis/application/v6/applications/cli_test", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{"app": map[string]any{
+					"callback_info": map[string]any{"callback_type": "websocket", "subscribed_callbacks": []string{"card.action.trigger"}},
+				}},
+			})
+		case http.MethodPatch:
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 99991672,
+				"msg":  "Access denied. One of the following scopes is required: [application:application]. https://open.feishu.cn/app/cli_test/auth?q=application:application&op_from=openapi&token_type=tenant",
+			})
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := im.FeishuRegistrationClient{
+		OpenBaseURL: server.URL,
+		HTTPClient:  server.Client(),
+	}
+	status, err := client.EnsureMessageEventSubscription(context.Background(), "cli_test", "secret_test", "feishu")
+	if err != nil {
+		t.Fatalf("ensure subscription: %v", err)
+	}
+	if status.Ready || len(status.MissingEvents) != 1 || status.MissingEvents[0] != "im.message.receive_v1" {
+		t.Fatalf("expected missing message event status: %#v", status)
+	}
+	if status.PermissionURL == "" || status.ConfigURL == "" {
+		t.Fatalf("expected diagnostic URLs: %#v", status)
 	}
 }

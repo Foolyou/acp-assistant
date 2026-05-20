@@ -94,6 +94,9 @@ func TestFeishuChannelAddCanUseQRRegistrationWithoutManualWebsocketURL(t *testin
 	if !strings.Contains(out.String(), "Scan the QR code") || !strings.Contains(out.String(), "ABCD-EFGH") {
 		t.Fatalf("expected QR onboarding output, got:\n%s", out.String())
 	}
+	if !strings.Contains(out.String(), "Message event subscription: ready") {
+		t.Fatalf("expected event subscription output, got:\n%s", out.String())
+	}
 	channels, err := configspace.LoadChannels(configDir)
 	if err != nil {
 		t.Fatalf("load channels: %v", err)
@@ -110,6 +113,9 @@ func TestFeishuChannelAddCanUseQRRegistrationWithoutManualWebsocketURL(t *testin
 	}
 	if channel.Options["bot_open_id"] != "ou_bot" || channel.Options["bot_name"] != "Live Bot" {
 		t.Fatalf("expected bot metadata in channel options: %#v", channel.Options)
+	}
+	if channel.Options["message_event_subscription"] != "ready" || channel.Options["event_config_url"] == "" {
+		t.Fatalf("expected event subscription metadata in channel options: %#v", channel.Options)
 	}
 	appIDBytes, err := os.ReadFile(channel.Credentials["app_id"].Path)
 	if err != nil {
@@ -153,6 +159,27 @@ func newFakeFeishuRegistrationServer(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("/open-apis/bot/v3/info", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "bot": map[string]string{"app_name": "Live Bot", "open_id": "ou_bot"}})
+	})
+	patchCalled := false
+	mux.HandleFunc("/open-apis/application/v6/applications/cli_test", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			subscribed := []string{"card.action.trigger"}
+			if patchCalled {
+				subscribed = append(subscribed, "im.message.receive_v1")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{"app": map[string]any{
+					"callback_info": map[string]any{"callback_type": "websocket", "subscribed_callbacks": subscribed},
+				}},
+			})
+		case http.MethodPatch:
+			patchCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "ok"})
+		default:
+			t.Fatalf("unexpected app config method %s", r.Method)
+		}
 	})
 	return httptest.NewServer(mux)
 }
