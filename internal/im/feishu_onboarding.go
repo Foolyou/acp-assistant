@@ -13,6 +13,7 @@ import (
 )
 
 const feishuRegistrationPath = "/oauth/v1/app/registration"
+const feishuRegistrationSource = "hermes"
 
 var requiredFeishuMessageEvents = []string{"im.message.receive_v1"}
 
@@ -329,7 +330,7 @@ func (c FeishuRegistrationClient) begin(ctx context.Context, domain string) (Fei
 		if strings.Contains(qrURL, "?") {
 			separator = "&"
 		}
-		qrURL += separator + "from=acpa&tp=acpa"
+		qrURL += separator + "from=" + feishuRegistrationSource + "&tp=" + feishuRegistrationSource
 	}
 	return FeishuRegistrationResult{
 		DeviceCode: deviceCode,

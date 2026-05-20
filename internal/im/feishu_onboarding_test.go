@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Foolyou/acp-assistant/internal/im"
@@ -105,6 +106,9 @@ func TestFeishuRegistrationFlowCreatesCredentialsAndProbesBot(t *testing.T) {
 	}
 	if result.QRURL == "" || result.UserCode != "ABCD-EFGH" {
 		t.Fatalf("missing QR registration metadata: %#v", result)
+	}
+	if !strings.Contains(result.QRURL, "from=hermes") || !strings.Contains(result.QRURL, "tp=hermes") {
+		t.Fatalf("expected Hermes-compatible onboarding URL, got %q", result.QRURL)
 	}
 	if !result.EventSubscriptionReady || !patchCalled {
 		t.Fatalf("expected message event subscription to be configured: %#v patch=%t", result.EventSubscription, patchCalled)
