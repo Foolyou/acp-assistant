@@ -71,7 +71,7 @@ type feishuLongConnectionConfig struct {
 	Domain       string
 	OpenBaseURL  string
 	OAuthBaseURL string
-	HTTPClient   larkcore.HttpClient
+	HTTPClient   *http.Client
 }
 
 var newFeishuLongConnection = func(cfg feishuLongConnectionConfig) (feishuLongConnection, error) {

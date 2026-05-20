@@ -22,6 +22,9 @@ func TestFeishuAccountStartUsesSDKLongConnectionWithoutWebsocketURL(t *testing.T
 		if cfg.Domain != "feishu" {
 			t.Fatalf("unexpected domain: %#v", cfg)
 		}
+		if cfg.HTTPClient != nil {
+			t.Fatalf("nil HTTP client should not be wrapped into SDK config: %#v", cfg.HTTPClient)
+		}
 		return fake, nil
 	}
 
