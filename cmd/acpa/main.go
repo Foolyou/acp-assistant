@@ -383,11 +383,16 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 	accountID := fs.String("account-id", "main", "account id")
 	displayName := fs.String("name", "", "display name")
 	setupURL := fs.String("setup-url", "", "setup URL")
+	domain := fs.String("domain", "feishu", "Feishu/Lark domain: feishu or lark")
+	manual := fs.Bool("manual", false, "skip QR registration and use explicit credential flags")
 	appIDEnv := fs.String("app-id-env", "", "app id env var")
 	appSecretEnv := fs.String("app-secret-env", "", "app secret env var")
 	appIDFile := fs.String("app-id-file", "", "app id file")
 	appSecretFile := fs.String("app-secret-file", "", "app secret file")
 	websocketURL := fs.String("websocket-url", "", "gateway websocket URL")
+	registrationBaseURL := fs.String("registration-base-url", "", "override Feishu accounts base URL")
+	openBaseURL := fs.String("open-base-url", "", "override Feishu open platform base URL")
+	onboardingTimeout := fs.Int("onboarding-timeout", 600, "QR onboarding timeout seconds")
 	enabled := fs.Bool("enabled", true, "enable channel")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -403,7 +408,34 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 		*displayName = promptDefault(reader, stdout, "display name", *id)
 	}
 	credentials := map[string]model.SecretRef{}
-	if *appIDEnv != "" {
+	options := map[string]string{"connection_mode": "websocket"}
+	if platform == model.PlatformFeishu {
+		options["domain"] = *domain
+		if strings.TrimSpace(*openBaseURL) != "" {
+			options["open_base_url"] = strings.TrimRight(*openBaseURL, "/")
+		}
+	}
+	hasManualCredentials := *appIDEnv != "" || *appIDFile != "" || *appSecretEnv != "" || *appSecretFile != ""
+	if platform == model.PlatformFeishu && !*manual && !hasManualCredentials {
+		result, err := runFeishuQRRegistration(ctx, *domain, *registrationBaseURL, *openBaseURL, *onboardingTimeout, stdout)
+		if err != nil {
+			return err
+		}
+		appIDPath := filepath.Join(*configDir, "secrets", *id+".app_id")
+		appSecretPath := filepath.Join(*configDir, "secrets", *id+".app_secret")
+		if err := writeSecretFile(appIDPath, result.AppID); err != nil {
+			return err
+		}
+		if err := writeSecretFile(appSecretPath, result.AppSecret); err != nil {
+			return err
+		}
+		credentials["app_id"] = model.SecretRef{Type: model.SecretFile, Path: appIDPath}
+		credentials["app_secret"] = model.SecretRef{Type: model.SecretFile, Path: appSecretPath}
+		options["domain"] = result.Domain
+		options["owner_open_id"] = result.OpenID
+		options["bot_open_id"] = result.BotOpenID
+		options["bot_name"] = result.BotName
+	} else if *appIDEnv != "" {
 		credentials["app_id"] = model.SecretRef{Type: model.SecretEnv, Name: *appIDEnv}
 	} else if *appIDFile != "" {
 		credentials["app_id"] = model.SecretRef{Type: model.SecretFile, Path: *appIDFile}
@@ -430,6 +462,7 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 		DisplayName:      *displayName,
 		Enabled:          *enabled,
 		Credentials:      credentials,
+		Options:          options,
 		SetupURL:         *setupURL,
 		RejectNonPrivate: true,
 		TextChunkLimit:   3500,
@@ -439,9 +472,45 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 		return err
 	}
 	fmt.Fprintf(stdout, "wrote %s channel %s\n", platform, channel.ID)
-	printOnboarding(platform, *setupURL, stdout)
+	if platform != model.PlatformFeishu || *manual || hasManualCredentials {
+		printOnboarding(platform, *setupURL, stdout)
+	}
 	_, _ = ctx, reader
 	return nil
+}
+
+func runFeishuQRRegistration(ctx context.Context, domain, registrationBaseURL, openBaseURL string, timeout int, stdout io.Writer) (im.FeishuRegistrationResult, error) {
+	client := im.FeishuRegistrationClient{AccountsBaseURL: registrationBaseURL, OpenBaseURL: openBaseURL}
+	begin, err := client.Begin(ctx, im.FeishuRegistrationOptions{Domain: domain, TimeoutSeconds: timeout})
+	if err != nil {
+		return im.FeishuRegistrationResult{}, err
+	}
+	fmt.Fprintln(stdout, "Scan the QR code with Feishu to create and configure the bot app.")
+	if begin.QRURL != "" {
+		if code, err := qrcode.New(begin.QRURL, qrcode.Medium); err == nil {
+			fmt.Fprintln(stdout, code.ToString(false))
+		}
+		fmt.Fprintf(stdout, "URL: %s\n", begin.QRURL)
+	}
+	if begin.UserCode != "" {
+		fmt.Fprintf(stdout, "User code: %s\n", begin.UserCode)
+	}
+	result, err := client.Poll(ctx, begin)
+	if err != nil {
+		return im.FeishuRegistrationResult{}, err
+	}
+	fmt.Fprintf(stdout, "Feishu app registered: %s\n", result.AppID)
+	if result.BotName != "" {
+		fmt.Fprintf(stdout, "Bot: %s\n", result.BotName)
+	}
+	return result, nil
+}
+
+func writeSecretFile(path, value string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(value+"\n"), 0o600)
 }
 
 func channelStatus(ctx context.Context, args []string, stdout io.Writer) error {

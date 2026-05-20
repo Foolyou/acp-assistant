@@ -16,6 +16,11 @@ import (
 
 	"github.com/Foolyou/acp-assistant/internal/model"
 	"github.com/gorilla/websocket"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkchannel "github.com/larksuite/oapi-sdk-go/v3/channel"
+	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
 type Decision string
@@ -45,6 +50,51 @@ type AccountConfig struct {
 	HTTPClient  *http.Client
 	OnInbound   InboundHandler
 	OnStatus    StatusRecorder
+}
+
+type feishuLongConnection interface {
+	Start(context.Context) error
+	Stop(context.Context) error
+	Send(context.Context, *channeltypes.SendInput) (*channeltypes.SendResult, error)
+	OnMessage(func(context.Context, *channeltypes.NormalizedMessage) error)
+	OnReject(func(context.Context, *channeltypes.RejectEvent) error)
+	OnReady(func())
+	OnError(func(error))
+	OnReconnecting(func())
+	OnReconnected(func())
+	OnDisconnected(func())
+}
+
+type feishuLongConnectionConfig struct {
+	AppID        string
+	AppSecret    string
+	Domain       string
+	OpenBaseURL  string
+	OAuthBaseURL string
+	HTTPClient   larkcore.HttpClient
+}
+
+var newFeishuLongConnection = func(cfg feishuLongConnectionConfig) (feishuLongConnection, error) {
+	openBaseURL := feishuOpenBaseURL(cfg.Domain, cfg.OpenBaseURL)
+	clientOptions := []lark.ClientOptionFunc{
+		lark.WithOpenBaseUrl(openBaseURL),
+		lark.WithOAuthBaseUrl(feishuOAuthBaseURL(cfg.Domain, cfg.OAuthBaseURL)),
+		lark.WithLogLevel(larkcore.LogLevelError),
+		lark.WithLogger(noopLarkLogger{}),
+	}
+	if cfg.HTTPClient != nil {
+		clientOptions = append(clientOptions, lark.WithHttpClient(cfg.HTTPClient))
+	}
+	client := lark.NewClient(cfg.AppID, cfg.AppSecret, clientOptions...)
+	wsClient := larkws.NewClient(
+		cfg.AppID,
+		cfg.AppSecret,
+		larkws.WithDomain(openBaseURL),
+		larkws.WithAutoReconnect(true),
+		larkws.WithLogLevel(larkcore.LogLevelError),
+		larkws.WithLogger(noopLarkLogger{}),
+	)
+	return larkchannel.NewChannel(client, wsClient), nil
 }
 
 type BaseAccount struct {
@@ -95,6 +145,8 @@ func (a *BaseAccount) setStatus(ctx context.Context, state model.ConnectorState,
 
 type FeishuAccount struct {
 	BaseAccount
+	connMu  sync.Mutex
+	conn    feishuLongConnection
 	tokenMu sync.Mutex
 	token   string
 }
@@ -108,18 +160,79 @@ func (a *FeishuAccount) Start(ctx context.Context) error {
 	if !a.cfg.Channel.Enabled {
 		return a.setStatus(ctx, model.ConnectorStateDisabled, "channel disabled", "")
 	}
+	appID := strings.TrimSpace(a.cfg.Secrets["app_id"])
+	appSecret := strings.TrimSpace(a.cfg.Secrets["app_secret"])
+	if appID == "" || appSecret == "" {
+		err := fmt.Errorf("Feishu app_id and app_secret are required")
+		_ = a.setStatus(ctx, model.ConnectorStateFailed, "missing Feishu credentials", err.Error())
+		return err
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 	if err := a.setStatus(ctx, model.ConnectorStateConnecting, "starting Feishu long connection", ""); err != nil {
 		return err
 	}
-	go a.runWebSocket(runCtx, model.PlatformFeishu)
+	conn, err := newFeishuLongConnection(feishuLongConnectionConfig{
+		AppID:        appID,
+		AppSecret:    appSecret,
+		Domain:       a.cfg.Channel.Options["domain"],
+		OpenBaseURL:  a.cfg.Channel.Options["open_base_url"],
+		OAuthBaseURL: a.cfg.Channel.Options["oauth_base_url"],
+		HTTPClient:   a.cfg.HTTPClient,
+	})
+	if err != nil {
+		cancel()
+		_ = a.setStatus(ctx, model.ConnectorStateFailed, "failed to create Feishu long connection", err.Error())
+		return err
+	}
+	conn.OnReady(func() {
+		_ = a.setStatus(context.Background(), model.ConnectorStateConnected, "Feishu long connection ready", "")
+	})
+	conn.OnError(func(err error) {
+		lastErr := ""
+		if err != nil {
+			lastErr = err.Error()
+		}
+		_ = a.setStatus(context.Background(), model.ConnectorStateFailed, "Feishu long connection error", lastErr)
+	})
+	conn.OnReconnecting(func() {
+		_ = a.setStatus(context.Background(), model.ConnectorStateConnecting, "Feishu long connection reconnecting", "")
+	})
+	conn.OnReconnected(func() {
+		_ = a.setStatus(context.Background(), model.ConnectorStateConnected, "Feishu long connection reconnected", "")
+	})
+	conn.OnDisconnected(func() {
+		_ = a.setStatus(context.Background(), model.ConnectorStateDisconnected, "Feishu long connection disconnected", "")
+	})
+	conn.OnReject(func(ctx context.Context, event *channeltypes.RejectEvent) error {
+		reason := ""
+		if event != nil {
+			reason = event.Reason
+		}
+		return a.setStatus(ctx, model.ConnectorStateConnected, "rejected inbound event", reason)
+	})
+	conn.OnMessage(a.handleFeishuSDKMessage)
+	a.connMu.Lock()
+	a.conn = conn
+	a.connMu.Unlock()
+	go func() {
+		if err := conn.Start(runCtx); err != nil && runCtx.Err() == nil {
+			_ = a.setStatus(context.Background(), model.ConnectorStateFailed, "Feishu long connection stopped", err.Error())
+		}
+	}()
 	return nil
 }
 
 func (a *FeishuAccount) Stop(ctx context.Context) error {
 	if a.cancel != nil {
 		a.cancel()
+	}
+	a.connMu.Lock()
+	conn := a.conn
+	a.conn = nil
+	a.connMu.Unlock()
+	if conn != nil {
+		_ = conn.Stop(ctx)
 	}
 	return a.setStatus(ctx, model.ConnectorStateDisconnected, "stopped", "")
 }
@@ -131,7 +244,8 @@ func (a *FeishuAccount) RefreshToken(ctx context.Context) error {
 		return fmt.Errorf("Feishu app_id and app_secret are required")
 	}
 	body, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, defaulted(a.cfg.Secrets["token_url"], "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"), bytes.NewReader(body))
+	tokenURL := defaulted(a.cfg.Secrets["token_url"], feishuOpenBaseURL(a.cfg.Channel.Options["domain"], a.cfg.Channel.Options["open_base_url"])+"/open-apis/auth/v3/tenant_access_token/internal")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -163,6 +277,19 @@ func (a *FeishuAccount) RefreshToken(ctx context.Context) error {
 }
 
 func (a *FeishuAccount) Send(ctx context.Context, msg model.OutboundMessage) error {
+	a.connMu.Lock()
+	conn := a.conn
+	a.connMu.Unlock()
+	if conn != nil {
+		input := &channeltypes.SendInput{
+			ReceiveID: msg.PlatformUserID,
+			ChatID:    msg.PrivateChannelID,
+			MsgType:   "text",
+			Text:      msg.Text,
+		}
+		_, err := conn.Send(ctx, input)
+		return err
+	}
 	token := a.currentToken()
 	if token == "" {
 		if err := a.RefreshToken(ctx); err != nil {
@@ -175,7 +302,7 @@ func (a *FeishuAccount) Send(ctx context.Context, msg model.OutboundMessage) err
 		"msg_type":   "text",
 		"content":    mustJSONString(map[string]string{"text": msg.Text}),
 	})
-	url := defaulted(a.cfg.Secrets["send_url"], "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id")
+	url := defaulted(a.cfg.Secrets["send_url"], feishuOpenBaseURL(a.cfg.Channel.Options["domain"], a.cfg.Channel.Options["open_base_url"])+"/open-apis/im/v1/messages?receive_id_type=open_id")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return err
@@ -190,6 +317,37 @@ func (a *FeishuAccount) Send(ctx context.Context, msg model.OutboundMessage) err
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 		return fmt.Errorf("Feishu send failed: %s", strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
+func (a *FeishuAccount) handleFeishuSDKMessage(ctx context.Context, sdkMsg *channeltypes.NormalizedMessage) error {
+	if sdkMsg == nil {
+		return nil
+	}
+	if sdkMsg.ChatType != "p2p" {
+		return a.setStatus(ctx, model.ConnectorStateConnected, "ignored non-private inbound event", string(DecisionRejectedNonPrivate))
+	}
+	messageID := sdkMsg.MessageID
+	if messageID == "" {
+		messageID = sdkMsg.EventID
+	}
+	timestamp := time.Now().UTC()
+	if sdkMsg.CreateTimeMs > 0 {
+		timestamp = time.UnixMilli(sdkMsg.CreateTimeMs).UTC()
+	}
+	msg := model.InboundMessage{
+		AssistantID:      a.cfg.AssistantID,
+		Platform:         model.PlatformFeishu,
+		AccountID:        a.cfg.Channel.AccountID,
+		PrivateChannelID: sdkMsg.ChatID,
+		PlatformUserID:   sdkMsg.UserID,
+		MessageID:        messageID,
+		Text:             sdkMsg.Content,
+		Timestamp:        timestamp,
+	}
+	if a.cfg.OnInbound != nil {
+		return a.cfg.OnInbound(ctx, msg)
 	}
 	return nil
 }
@@ -473,6 +631,26 @@ func defaulted(value, fallback string) string {
 	return value
 }
 
+func feishuOpenBaseURL(domain, override string) string {
+	if strings.TrimSpace(override) != "" {
+		return strings.TrimRight(override, "/")
+	}
+	if domain == "lark" {
+		return lark.LarkBaseUrl
+	}
+	return lark.FeishuBaseUrl
+}
+
+func feishuOAuthBaseURL(domain, override string) string {
+	if strings.TrimSpace(override) != "" {
+		return strings.TrimRight(override, "/")
+	}
+	if domain == "lark" {
+		return lark.OAuthBaseUrlLark
+	}
+	return lark.OAuthBaseUrlFeishu
+}
+
 func sleepContext(ctx context.Context, d time.Duration) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -488,3 +666,10 @@ func minDuration(a, b time.Duration) time.Duration {
 	}
 	return b
 }
+
+type noopLarkLogger struct{}
+
+func (noopLarkLogger) Debug(context.Context, ...interface{}) {}
+func (noopLarkLogger) Info(context.Context, ...interface{})  {}
+func (noopLarkLogger) Warn(context.Context, ...interface{})  {}
+func (noopLarkLogger) Error(context.Context, ...interface{}) {}

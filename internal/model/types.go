@@ -106,6 +106,7 @@ type ChannelConfig struct {
 	Enabled          bool                 `yaml:"enabled" json:"enabled"`
 	Credentials      map[string]SecretRef `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 	SetupURL         string               `yaml:"setup_url,omitempty" json:"setup_url,omitempty"`
+	Options          map[string]string    `yaml:"options,omitempty" json:"options,omitempty"`
 	TokenCachePath   string               `yaml:"token_cache_path,omitempty" json:"token_cache_path,omitempty"`
 	RejectNonPrivate bool                 `yaml:"reject_non_private" json:"reject_non_private"`
 	TextChunkLimit   int                  `yaml:"text_chunk_limit,omitempty" json:"text_chunk_limit,omitempty"`
