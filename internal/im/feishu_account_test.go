@@ -30,7 +30,7 @@ func TestFeishuAccountStartUsesSDKLongConnectionWithoutWebsocketURL(t *testing.T
 	}
 
 	var inbound []model.InboundMessage
-	var decisions []model.PermissionDecision
+	decisions := make(chan model.PermissionDecision, 1)
 	var statuses []model.ConnectorStatus
 	account := NewFeishuAccount(AccountConfig{
 		AssistantID: "assistant-1",
@@ -49,7 +49,7 @@ func TestFeishuAccountStartUsesSDKLongConnectionWithoutWebsocketURL(t *testing.T
 			return nil
 		},
 		OnPermissionDecision: func(ctx context.Context, decision model.PermissionDecision) error {
-			decisions = append(decisions, decision)
+			decisions <- decision
 			return nil
 		},
 		OnStatus: func(ctx context.Context, status model.ConnectorStatus) error {
@@ -108,11 +108,13 @@ func TestFeishuAccountStartUsesSDKLongConnectionWithoutWebsocketURL(t *testing.T
 			"option":            "approve",
 		}},
 	})
-	if len(decisions) != 1 {
-		t.Fatalf("expected one permission decision, got %#v", decisions)
-	}
-	if decisions[0].EventID != "card-event-1" || decisions[0].ShortApprovalID != "ABC123" || decisions[0].Option != "approve" || decisions[0].PlatformUserID != "ou_user" {
-		t.Fatalf("unexpected permission decision: %#v", decisions[0])
+	select {
+	case decision := <-decisions:
+		if decision.EventID != "card-event-1" || decision.ShortApprovalID != "ABC123" || decision.Option != "approve" || decision.PlatformUserID != "ou_user" {
+			t.Fatalf("unexpected permission decision: %#v", decision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected one permission decision")
 	}
 
 	if err := account.Stop(context.Background()); err != nil {
@@ -121,6 +123,35 @@ func TestFeishuAccountStartUsesSDKLongConnectionWithoutWebsocketURL(t *testing.T
 	if !fake.stopped {
 		t.Fatal("expected SDK long connection to stop")
 	}
+}
+
+func TestFeishuCardActionAcknowledgesBeforePermissionDecisionCompletes(t *testing.T) {
+	block := make(chan struct{})
+	account := NewFeishuAccount(AccountConfig{
+		AssistantID: "assistant-1",
+		Channel: model.ChannelConfig{
+			Platform:  model.PlatformFeishu,
+			AccountID: "main",
+		},
+		OnPermissionDecision: func(ctx context.Context, decision model.PermissionDecision) error {
+			<-block
+			return errors.New("late resolution failure")
+		},
+	})
+	err := account.handleFeishuCardAction(context.Background(), &channeltypes.CardActionEvent{
+		EventID:   "card-event-1",
+		MessageID: "om_card",
+		ChatID:    "oc_private",
+		Operator:  channeltypes.CardActionOperator{OpenID: "ou_user"},
+		Action: channeltypes.CardActionPayload{Value: map[string]interface{}{
+			"short_approval_id": "ABC123",
+			"option":            "approve",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("card action should be acknowledged immediately, got %v", err)
+	}
+	close(block)
 }
 
 func TestFeishuAccountSendsPermissionPromptCardWithTextFallback(t *testing.T) {

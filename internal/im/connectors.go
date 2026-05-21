@@ -445,9 +445,14 @@ func (a *FeishuAccount) handleFeishuCardAction(ctx context.Context, event *chann
 		ShortApprovalID:  stringMapValue(event.Action.Value, "short_approval_id"),
 		Option:           option,
 	}
-	if a.cfg.OnPermissionDecision != nil {
-		return a.cfg.OnPermissionDecision(ctx, decision)
+	if a.cfg.OnPermissionDecision == nil {
+		return nil
 	}
+	go func() {
+		if err := a.cfg.OnPermissionDecision(context.Background(), decision); err != nil {
+			_ = a.setStatus(context.Background(), model.ConnectorStateConnected, "permission card action failed", err.Error())
+		}
+	}()
 	return nil
 }
 
