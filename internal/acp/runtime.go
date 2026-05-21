@@ -42,6 +42,7 @@ type Config struct {
 	Args         []string
 	Env          map[string]string
 	Workspace    string
+	ProcessDir   string
 	PromptPrefix string
 	OnEvent      func(Event)
 	OnRequest    func(Request) bool
@@ -118,16 +119,19 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return nil
 	}
 	r.mu.Unlock()
-	workspace := strings.TrimSpace(r.cfg.Workspace)
+	processDir := strings.TrimSpace(r.cfg.ProcessDir)
+	if processDir == "" {
+		processDir = strings.TrimSpace(r.cfg.Workspace)
+	}
 	cmd := exec.CommandContext(ctx, r.cfg.Command, r.cfg.Args...)
-	if workspace != "" {
-		cmd.Dir = workspace
+	if processDir != "" {
+		cmd.Dir = processDir
 	}
 	if len(r.cfg.Env) > 0 {
 		cmd.Env = os.Environ()
-		if workspace != "" {
+		if processDir != "" {
 			cmd.Env = appendWithoutEnvKey(cmd.Env, "PWD")
-			cmd.Env = append(cmd.Env, "PWD="+workspace)
+			cmd.Env = append(cmd.Env, "PWD="+processDir)
 		}
 		for key, value := range r.cfg.Env {
 			cmd.Env = append(cmd.Env, key+"="+value)

@@ -108,6 +108,32 @@ func TestRuntimeStartUsesWorkspaceAsProcessDirectory(t *testing.T) {
 	defer rt.Stop()
 }
 
+func TestRuntimeStartUsesConfiguredProcessDirectory(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	workspace := t.TempDir()
+	processDir := t.TempDir()
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "cwd_check")
+	t.Setenv("ACPA_EXPECTED_CWD", processDir)
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeStartUsesConfiguredProcessDirectory")
+	rt := acp.NewRuntime(acp.Config{
+		Command:    cmd.Path,
+		Args:       cmd.Args[1:],
+		Env:        map[string]string{"ACPA_RUNTIME_CUSTOM_ENV": "from-runtime"},
+		Workspace:  workspace,
+		ProcessDir: processDir,
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+}
+
 func TestRuntimeLoadSessionIncludesMCPServers(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()

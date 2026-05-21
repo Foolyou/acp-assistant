@@ -747,6 +747,7 @@ func (h *runtimeHarness) launchProfile(mode model.PermissionMode) (harnesspkg.La
 		Env:             overlay.Env,
 		ClaudePluginDir: overlay.ClaudePluginDir,
 		PromptPrefix:    overlay.PromptPrefix,
+		ProcessDir:      overlay.ProcessDir,
 	})
 }
 
@@ -766,6 +767,7 @@ func (h *runtimeHarness) runtime(ctx context.Context, profile harnesspkg.LaunchP
 			Args:         profile.Args,
 			Env:          profile.Env,
 			Workspace:    h.cfg.WorkspacePath,
+			ProcessDir:   profile.ProcessDir,
 			PromptPrefix: profile.PromptPrefix,
 			OnEvent:      h.handleACPEvent,
 			OnRequest:    h.handleACPRequest,

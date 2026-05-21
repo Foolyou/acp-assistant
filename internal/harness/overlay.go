@@ -16,6 +16,7 @@ type Overlay struct {
 	Env             map[string]string
 	ClaudePluginDir string
 	PromptPrefix    string
+	ProcessDir      string
 }
 
 func PrepareOverlay(cfg model.AssistantConfig, acpaHome string) (Overlay, error) {
@@ -32,16 +33,32 @@ func PrepareOverlay(cfg model.AssistantConfig, acpaHome string) (Overlay, error)
 		if err := prepareCodexOverlay(codexHome, acpaHome, cfg.ConfigspacePath); err != nil {
 			return Overlay{}, err
 		}
-		return Overlay{Env: map[string]string{"CODEX_HOME": codexHome}, PromptPrefix: prefix}, nil
+		processDir, err := prepareProcessDir(acpaHome, cfg, model.ProviderCodex)
+		if err != nil {
+			return Overlay{}, err
+		}
+		return Overlay{Env: map[string]string{"CODEX_HOME": codexHome}, PromptPrefix: prefix, ProcessDir: processDir}, nil
 	case model.ProviderClaude:
 		pluginDir := filepath.Join(cfg.ConfigspacePath, "harness", "claude-plugin")
 		if err := prepareClaudeOverlay(pluginDir, cfg, acpaHome, cfg.ConfigspacePath); err != nil {
 			return Overlay{}, err
 		}
-		return Overlay{ClaudePluginDir: pluginDir, PromptPrefix: prefix}, nil
+		processDir, err := prepareProcessDir(acpaHome, cfg, model.ProviderClaude)
+		if err != nil {
+			return Overlay{}, err
+		}
+		return Overlay{ClaudePluginDir: pluginDir, PromptPrefix: prefix, ProcessDir: processDir}, nil
 	default:
 		return Overlay{PromptPrefix: prefix}, nil
 	}
+}
+
+func prepareProcessDir(acpaHome string, cfg model.AssistantConfig, provider model.HarnessProvider) (string, error) {
+	processDir := filepath.Join(acpaHome, "runtime-cwd", safeName(cfg.ID), safeName(string(provider)))
+	if err := os.MkdirAll(processDir, 0o755); err != nil {
+		return "", err
+	}
+	return processDir, nil
 }
 
 func prepareCodexOverlay(codexHome, acpaHome, configspacePath string) error {

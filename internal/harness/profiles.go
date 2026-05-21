@@ -15,6 +15,7 @@ type ProfileOptions struct {
 	Env             map[string]string
 	ClaudePluginDir string
 	PromptPrefix    string
+	ProcessDir      string
 }
 
 type LaunchProfile struct {
@@ -25,6 +26,7 @@ type LaunchProfile struct {
 	Args           []string              `json:"args"`
 	Env            map[string]string     `json:"env,omitempty"`
 	PromptPrefix   string                `json:"prompt_prefix,omitempty"`
+	ProcessDir     string                `json:"process_dir,omitempty"`
 }
 
 func ResolveLaunchProfile(provider model.HarnessProvider, mode model.PermissionMode, options ProfileOptions) (LaunchProfile, error) {
@@ -80,7 +82,7 @@ func codexProfile(mode model.PermissionMode, options ProfileOptions) (LaunchProf
 	if strings.TrimSpace(options.ResponseMode) != "" {
 		args = append(args, "-c", fmt.Sprintf("response_mode=%q", options.ResponseMode))
 	}
-	return LaunchProfile{Provider: model.ProviderCodex, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix}, nil
+	return LaunchProfile{Provider: model.ProviderCodex, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix, ProcessDir: options.ProcessDir}, nil
 }
 
 func claudeProfile(mode model.PermissionMode, options ProfileOptions) (LaunchProfile, error) {
@@ -104,7 +106,7 @@ func claudeProfile(mode model.PermissionMode, options ProfileOptions) (LaunchPro
 	if strings.TrimSpace(options.ClaudePluginDir) != "" {
 		args = append(args, "--plugin-dir", options.ClaudePluginDir)
 	}
-	return LaunchProfile{Provider: model.ProviderClaude, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix}, nil
+	return LaunchProfile{Provider: model.ProviderClaude, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix, ProcessDir: options.ProcessDir}, nil
 }
 
 func cloneEnv(env map[string]string) map[string]string {

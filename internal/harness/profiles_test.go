@@ -110,6 +110,9 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	if overlay.Env["CODEX_HOME"] != codexHome {
 		t.Fatalf("unexpected codex env: %#v", overlay.Env)
 	}
+	if overlay.ProcessDir != filepath.Join(globalHome, "runtime-cwd", "alpha", "codex") {
+		t.Fatalf("unexpected codex process dir: %#v", overlay)
+	}
 	for _, path := range []string{
 		filepath.Join(codexHome, "config.toml"),
 		filepath.Join(codexHome, "auth.json"),
@@ -142,6 +145,9 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	claudePlugin := filepath.Join(configDir, "harness", "claude-plugin")
 	if overlay.ClaudePluginDir != claudePlugin {
 		t.Fatalf("unexpected claude plugin dir: %#v", overlay)
+	}
+	if overlay.ProcessDir != filepath.Join(globalHome, "runtime-cwd", "alpha", "claude") {
+		t.Fatalf("unexpected claude process dir: %#v", overlay)
 	}
 	for _, path := range []string{
 		filepath.Join(claudePlugin, ".claude-plugin", "plugin.json"),
