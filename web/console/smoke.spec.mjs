@@ -56,6 +56,12 @@ test("feishu qr setup waits for explicit completion", async ({ page }) => {
       body: JSON.stringify({ id: "feishu-main" }),
     });
   });
+  await page.route("**/api/assistants/**/restart", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ id: "crawl", running: true }),
+    });
+  });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(consoleURL, { waitUntil: "networkidle" });
@@ -68,6 +74,6 @@ test("feishu qr setup waits for explicit completion", async ({ page }) => {
   expect(completeCalls).toBe(0);
 
   await page.getByRole("button", { name: "Check and Save Channel" }).click();
-  await expect(page.getByText("Feishu channel saved: feishu-main")).toBeVisible();
+  await expect(page.getByText("Feishu channel saved: feishu-main. Assistant restarted.")).toBeVisible();
   expect(completeCalls).toBe(1);
 });

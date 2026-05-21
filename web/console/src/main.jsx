@@ -424,7 +424,9 @@ function FeishuSetup({ assistant, onDone, onError }) {
       if (mode === "manual") {
         await api("setup/feishu/manual", { method: "POST", body: JSON.stringify(payload) });
         setQRBegin(null);
-        setStatus("Feishu app saved.");
+        setStatus("Feishu app saved. Restarting assistant to load the connector...");
+        await restartAfterSave(assistant.id);
+        setStatus("Feishu app saved and assistant restarted.");
       } else {
         if (!qrBegin) {
           setStatus("Starting QR registration...");
@@ -439,7 +441,9 @@ function FeishuSetup({ assistant, onDone, onError }) {
         try {
           const channel = await api("setup/feishu/qr/complete", { method: "POST", body: JSON.stringify({ ...payload, onboarding_timeout_sec: 20, begin: qrBegin }) });
           setQRBegin(null);
-          setStatus(`Feishu channel saved: ${channel.id}`);
+          setStatus(`Feishu channel saved: ${channel.id}. Restarting assistant to load the connector...`);
+          await restartAfterSave(assistant.id);
+          setStatus(`Feishu channel saved: ${channel.id}. Assistant restarted.`);
         } catch (err) {
           if (String(err.message).toLowerCase().includes("timed out")) {
             setStatus("Still waiting for Feishu approval. Finish the setup in Feishu, then tap Check and Save Channel again.");
@@ -454,6 +458,10 @@ function FeishuSetup({ assistant, onDone, onError }) {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function restartAfterSave(id) {
+    await api(`assistants/${id}/restart`, { method: "POST" });
   }
 
   const qrURL = qrBegin?.QRURL || qrBegin?.qr_url;
