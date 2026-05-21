@@ -179,9 +179,58 @@ func (r *Runtime) RecordPermissionRequest(ctx context.Context, req PermissionReq
 			PlatformUserID:   session.Binding.PlatformUserID,
 			Text:             text,
 			CreatedAt:        time.Now().UTC(),
+			PermissionPrompt: &model.PermissionPrompt{
+				ShortApprovalID: permission.ShortApprovalID,
+				Options:         append([]string(nil), permission.Options...),
+				Text:            text,
+			},
 		})
 	}
 	return permission, nil
+}
+
+func (r *Runtime) HandlePermissionDecision(ctx context.Context, decision model.PermissionDecision) error {
+	shortID := strings.ToUpper(strings.TrimSpace(decision.ShortApprovalID))
+	if shortID == "" {
+		return fmt.Errorf("permission decision requires an approval id")
+	}
+	if decision.AssistantID == "" {
+		decision.AssistantID = r.cfg.AssistantID
+	}
+	if decision.EventID != "" {
+		duplicate, err := r.cfg.Store.RememberIdempotency(ctx, decision.AssistantID, decision.Platform, decision.AccountID, "permission_decision:"+decision.EventID)
+		if err != nil {
+			return err
+		}
+		if duplicate {
+			return nil
+		}
+	}
+	permission, err := r.cfg.Store.PermissionByShortID(ctx, shortID)
+	if err != nil {
+		return err
+	}
+	owner := model.SessionBindingKey{
+		AssistantID:      decision.AssistantID,
+		Platform:         decision.Platform,
+		AccountID:        decision.AccountID,
+		PrivateChannelID: decision.PrivateChannelID,
+		PlatformUserID:   decision.PlatformUserID,
+	}
+	if permission.Owner != owner {
+		return fmt.Errorf("permission %s belongs to a different owner", shortID)
+	}
+	if permission.Status != "pending" {
+		return nil
+	}
+	option := permissionDecisionOption(decision.Option, permission.Options)
+	if _, err := r.cfg.Store.ResolvePermission(ctx, shortID, owner, option); err != nil {
+		return err
+	}
+	if resolver, ok := r.cfg.Harness.(PermissionResolver); ok {
+		return resolver.ResolvePermission(ctx, shortID, option)
+	}
+	return nil
 }
 
 func (r *Runtime) ExpirePermissions(ctx context.Context, now time.Time) error {
@@ -282,6 +331,15 @@ func permissionCommandOption(command string, options []string) string {
 		return preferredPermissionOption(options, []string{"reject", "rejected", "deny", "denied", "abort"}, "reject")
 	}
 	return preferredPermissionOption(options, []string{"approve", "approved", "allow", "allowed", "accept", "accepted"}, "approve")
+}
+
+func permissionDecisionOption(raw string, options []string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "reject", "rejected", "deny", "denied", "abort":
+		return permissionCommandOption("reject", options)
+	default:
+		return permissionCommandOption("approve", options)
+	}
 }
 
 func preferredPermissionOption(options, preferred []string, fallback string) string {

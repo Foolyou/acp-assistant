@@ -42,15 +42,17 @@ type Account interface {
 }
 
 type InboundHandler func(context.Context, model.InboundMessage) error
+type PermissionDecisionHandler func(context.Context, model.PermissionDecision) error
 type StatusRecorder func(context.Context, model.ConnectorStatus) error
 
 type AccountConfig struct {
-	AssistantID string
-	Channel     model.ChannelConfig
-	Secrets     map[string]string
-	HTTPClient  *http.Client
-	OnInbound   InboundHandler
-	OnStatus    StatusRecorder
+	AssistantID          string
+	Channel              model.ChannelConfig
+	Secrets              map[string]string
+	HTTPClient           *http.Client
+	OnInbound            InboundHandler
+	OnPermissionDecision PermissionDecisionHandler
+	OnStatus             StatusRecorder
 }
 
 type feishuLongConnection interface {
@@ -58,6 +60,7 @@ type feishuLongConnection interface {
 	Stop(context.Context) error
 	Send(context.Context, *channeltypes.SendInput) (*channeltypes.SendResult, error)
 	OnMessage(func(context.Context, *channeltypes.NormalizedMessage) error)
+	OnCardAction(func(context.Context, *channeltypes.CardActionEvent) error)
 	OnReject(func(context.Context, *channeltypes.RejectEvent) error)
 	OnReady(func())
 	OnError(func(error))
@@ -219,6 +222,7 @@ func (a *FeishuAccount) Start(ctx context.Context) error {
 		return a.setStatus(ctx, model.ConnectorStateConnected, "rejected inbound event", reason)
 	})
 	conn.OnMessage(a.handleFeishuSDKMessage)
+	conn.OnCardAction(a.handleFeishuCardAction)
 	a.connMu.Lock()
 	a.conn = conn
 	a.connMu.Unlock()
@@ -288,6 +292,17 @@ func (a *FeishuAccount) Send(ctx context.Context, msg model.OutboundMessage) err
 	conn := a.conn
 	a.connMu.Unlock()
 	if conn != nil {
+		if msg.PermissionPrompt != nil {
+			cardInput := &channeltypes.SendInput{
+				ReceiveID: msg.PlatformUserID,
+				ChatID:    msg.PrivateChannelID,
+				MsgType:   "interactive",
+				Card:      renderFeishuPermissionCard(*msg.PermissionPrompt),
+			}
+			if _, err := conn.Send(ctx, cardInput); err == nil {
+				return nil
+			}
+		}
 		input := &channeltypes.SendInput{
 			ReceiveID: msg.PlatformUserID,
 			ChatID:    msg.PrivateChannelID,
@@ -328,6 +343,50 @@ func (a *FeishuAccount) Send(ctx context.Context, msg model.OutboundMessage) err
 	return nil
 }
 
+func renderFeishuPermissionCard(prompt model.PermissionPrompt) string {
+	text := strings.TrimSpace(prompt.Text)
+	if text == "" {
+		text = "Permission requested. Reply approve " + prompt.ShortApprovalID + " to allow or reject " + prompt.ShortApprovalID + " to deny."
+	}
+	card := map[string]any{
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": map[string]any{
+			"title": map[string]string{"tag": "plain_text", "content": "Agent action approval"},
+		},
+		"elements": []any{
+			map[string]any{
+				"tag":  "div",
+				"text": map[string]string{"tag": "lark_md", "content": text},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "primary",
+						"text": map[string]string{"tag": "plain_text", "content": "Allow"},
+						"value": map[string]string{
+							"short_approval_id": prompt.ShortApprovalID,
+							"option":            "approve",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "danger",
+						"text": map[string]string{"tag": "plain_text", "content": "Reject"},
+						"value": map[string]string{
+							"short_approval_id": prompt.ShortApprovalID,
+							"option":            "reject",
+						},
+					},
+				},
+			},
+		},
+	}
+	data, _ := json.Marshal(card)
+	return string(data)
+}
+
 func (a *FeishuAccount) handleFeishuSDKMessage(ctx context.Context, sdkMsg *channeltypes.NormalizedMessage) error {
 	if sdkMsg == nil {
 		return nil
@@ -355,6 +414,39 @@ func (a *FeishuAccount) handleFeishuSDKMessage(ctx context.Context, sdkMsg *chan
 	}
 	if a.cfg.OnInbound != nil {
 		return a.cfg.OnInbound(ctx, msg)
+	}
+	return nil
+}
+
+func (a *FeishuAccount) handleFeishuCardAction(ctx context.Context, event *channeltypes.CardActionEvent) error {
+	if event == nil {
+		return nil
+	}
+	userID := event.Operator.OpenID
+	if userID == "" {
+		userID = event.Operator.UserID
+	}
+	chatID := event.ChatID
+	if chatID == "" {
+		chatID = event.Context.OpenChatID
+	}
+	option := stringMapValue(event.Action.Value, "option")
+	if option == "" {
+		option = event.Action.Name
+	}
+	decision := model.PermissionDecision{
+		AssistantID:      a.cfg.AssistantID,
+		Platform:         model.PlatformFeishu,
+		AccountID:        a.cfg.Channel.AccountID,
+		PrivateChannelID: chatID,
+		PlatformUserID:   userID,
+		EventID:          event.EventID,
+		MessageID:        event.MessageID,
+		ShortApprovalID:  stringMapValue(event.Action.Value, "short_approval_id"),
+		Option:           option,
+	}
+	if a.cfg.OnPermissionDecision != nil {
+		return a.cfg.OnPermissionDecision(ctx, decision)
 	}
 	return nil
 }
@@ -635,6 +727,11 @@ func defaulted(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}
+	return value
+}
+
+func stringMapValue(values map[string]interface{}, key string) string {
+	value, _ := values[key].(string)
 	return value
 }
 

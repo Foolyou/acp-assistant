@@ -283,11 +283,12 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 			continue
 		}
 		accountCfg := im.AccountConfig{
-			AssistantID: cfg.ID,
-			Channel:     channel,
-			Secrets:     secrets,
-			OnInbound:   rt.HandleInbound,
-			OnStatus:    db.UpsertConnectorStatus,
+			AssistantID:          cfg.ID,
+			Channel:              channel,
+			Secrets:              secrets,
+			OnInbound:            rt.HandleInbound,
+			OnPermissionDecision: rt.HandlePermissionDecision,
+			OnStatus:             db.UpsertConnectorStatus,
 		}
 		var account im.Account
 		switch channel.Platform {

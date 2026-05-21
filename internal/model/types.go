@@ -188,13 +188,32 @@ func (m InboundMessage) BindingKey() SessionBindingKey {
 }
 
 type OutboundMessage struct {
-	AssistantID      string    `json:"assistant_id"`
-	Platform         Platform  `json:"platform"`
-	AccountID        string    `json:"account_id"`
-	PrivateChannelID string    `json:"private_channel_id"`
-	PlatformUserID   string    `json:"platform_user_id"`
-	Text             string    `json:"text"`
-	CreatedAt        time.Time `json:"created_at"`
+	AssistantID      string            `json:"assistant_id"`
+	Platform         Platform          `json:"platform"`
+	AccountID        string            `json:"account_id"`
+	PrivateChannelID string            `json:"private_channel_id"`
+	PlatformUserID   string            `json:"platform_user_id"`
+	Text             string            `json:"text"`
+	CreatedAt        time.Time         `json:"created_at"`
+	PermissionPrompt *PermissionPrompt `json:"permission_prompt,omitempty"`
+}
+
+type PermissionPrompt struct {
+	ShortApprovalID string   `json:"short_approval_id"`
+	Options         []string `json:"options,omitempty"`
+	Text            string   `json:"text"`
+}
+
+type PermissionDecision struct {
+	AssistantID      string   `json:"assistant_id"`
+	Platform         Platform `json:"platform"`
+	AccountID        string   `json:"account_id"`
+	PrivateChannelID string   `json:"private_channel_id"`
+	PlatformUserID   string   `json:"platform_user_id"`
+	EventID          string   `json:"event_id,omitempty"`
+	MessageID        string   `json:"message_id,omitempty"`
+	ShortApprovalID  string   `json:"short_approval_id"`
+	Option           string   `json:"option"`
 }
 
 type ConnectorStatus struct {
