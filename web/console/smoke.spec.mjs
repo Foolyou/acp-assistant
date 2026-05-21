@@ -34,7 +34,7 @@ test("console create sheet and doctor entry are reachable", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Doctor" }).first()).toBeVisible();
 });
 
-test("feishu qr setup waits for explicit completion", async ({ page }) => {
+test("feishu qr setup polls and saves automatically", async ({ page }) => {
   let completeCalls = 0;
   await page.route("**/api/setup/feishu/qr/begin", async (route) => {
     await route.fulfill({
@@ -51,6 +51,15 @@ test("feishu qr setup waits for explicit completion", async ({ page }) => {
   });
   await page.route("**/api/setup/feishu/qr/complete", async (route) => {
     completeCalls += 1;
+    if (completeCalls === 1) {
+      await route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Feishu registration timed out" }),
+      });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ id: "feishu-main" }),
@@ -70,10 +79,6 @@ test("feishu qr setup waits for explicit completion", async ({ page }) => {
 
   await expect(page.getByRole("link", { name: "Open Feishu setup" })).toBeVisible();
   await expect(page.locator(".code-box strong")).toHaveText("ABCD-EFGH");
-  await expect(page.getByRole("button", { name: "Check and Save Channel" })).toBeVisible();
-  expect(completeCalls).toBe(0);
-
-  await page.getByRole("button", { name: "Check and Save Channel" }).click();
   await expect(page.getByText("Feishu channel saved: feishu-main. Assistant restarted.")).toBeVisible();
-  expect(completeCalls).toBe(1);
+  expect(completeCalls).toBe(2);
 });

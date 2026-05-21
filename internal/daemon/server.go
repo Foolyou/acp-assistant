@@ -331,7 +331,11 @@ func (s *Server) handleFeishuQRComplete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	client := im.FeishuRegistrationClient{AccountsBaseURL: req.RegistrationBaseURL, OpenBaseURL: req.OpenBaseURL}
-	result, err := client.Poll(r.Context(), req.Begin)
+	begin := req.Begin
+	if req.OnboardingTimeoutSec > 0 {
+		begin.ExpireIn = req.OnboardingTimeoutSec
+	}
+	result, err := client.Poll(r.Context(), begin)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

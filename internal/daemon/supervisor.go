@@ -28,6 +28,7 @@ type worker struct {
 	cfg           model.AssistantConfig
 	cmd           *exec.Cmd
 	running       bool
+	stopping      bool
 	pid           int
 	lastStartedAt time.Time
 	lastStoppedAt time.Time
@@ -107,6 +108,11 @@ func (s *Supervisor) Start(ctx context.Context, configDir string) (AssistantStat
 	if err != nil {
 		return AssistantState{}, err
 	}
+	select {
+	case <-ctx.Done():
+		return AssistantState{}, ctx.Err()
+	default:
+	}
 	s.mu.Lock()
 	if w := s.workers[cfg.ID]; w != nil && w.running {
 		state := w.state()
@@ -124,7 +130,7 @@ func (s *Supervisor) Start(ctx context.Context, configDir string) (AssistantStat
 		_ = outLog.Close()
 		return AssistantState{}, err
 	}
-	cmd := exec.CommandContext(ctx, s.executable, "assistant", "serve", "--configspace", cfg.ConfigspacePath)
+	cmd := exec.Command(s.executable, "assistant", "serve", "--configspace", cfg.ConfigspacePath)
 	cmd.Stdout = outLog
 	cmd.Stderr = errLog
 	if err := cmd.Start(); err != nil {
@@ -145,9 +151,10 @@ func (s *Supervisor) Start(ctx context.Context, configDir string) (AssistantStat
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if current := s.workers[cfg.ID]; current == w {
+			wasRunning := w.running
 			w.running = false
 			w.lastStoppedAt = time.Now().UTC()
-			if err != nil {
+			if err != nil && wasRunning && !w.stopping {
 				w.lastError = err.Error()
 			}
 			_ = os.Remove(filepath.Join(cfg.ConfigspacePath, "assistant.pid"))
@@ -170,6 +177,9 @@ func (s *Supervisor) Stop(ctx context.Context, configDir string) (AssistantState
 		_ = os.Remove(filepath.Join(cfg.ConfigspacePath, "assistant.pid"))
 		return state, nil
 	}
+	s.mu.Lock()
+	w.stopping = true
+	s.mu.Unlock()
 	if err := w.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		return w.state(), err
 	}

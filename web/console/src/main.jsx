@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -414,14 +414,19 @@ function FeishuSetup({ assistant, onDone, onError }) {
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
   const [qrBegin, setQRBegin] = useState(null);
+  const [polling, setPolling] = useState(false);
+  const pollRun = useRef(0);
 
   useEffect(() => {
+    pollRun.current += 1;
     setQRBegin(null);
     setStatus("");
+    setPolling(false);
   }, [assistant.id, mode]);
 
   async function submit(event) {
     event.preventDefault();
+    if (mode === "qr" && qrBegin) return;
     setSaving(true);
     setStatus("");
     const form = new FormData(event.currentTarget);
@@ -441,22 +446,9 @@ function FeishuSetup({ assistant, onDone, onError }) {
           const qrURL = begin.QRURL || begin.qr_url;
           const userCode = begin.UserCode || begin.user_code;
           setQRBegin(begin);
-          setStatus([qrURL && "Open the setup link below.", userCode && `User code: ${userCode}`, "After approval, return here and check again."].filter(Boolean).join("\n"));
+          setStatus([qrURL && "Open the setup link below.", userCode && `User code: ${userCode}`, "Waiting for Feishu approval..."].filter(Boolean).join("\n"));
+          startAutoPoll(payload, begin);
           return;
-        }
-        setStatus("Checking Feishu approval...");
-        try {
-          const channel = await api("setup/feishu/qr/complete", { method: "POST", body: JSON.stringify({ ...payload, onboarding_timeout_sec: 20, begin: qrBegin }) });
-          setQRBegin(null);
-          setStatus(`Feishu channel saved: ${channel.id}. Restarting assistant to load the connector...`);
-          await restartAfterSave(assistant.id);
-          setStatus(`Feishu channel saved: ${channel.id}. Assistant restarted.`);
-        } catch (err) {
-          if (String(err.message).toLowerCase().includes("timed out")) {
-            setStatus("Still waiting for Feishu approval. Finish the setup in Feishu, then tap Check and Save Channel again.");
-            return;
-          }
-          throw err;
         }
       }
       await onDone();
@@ -467,6 +459,52 @@ function FeishuSetup({ assistant, onDone, onError }) {
     }
   }
 
+  function startAutoPoll(payload, begin) {
+    const run = ++pollRun.current;
+    setPolling(true);
+    void pollForApproval(payload, begin, run);
+  }
+
+  async function pollForApproval(payload, begin, run) {
+    const expiresIn = begin.ExpireIn || begin.expire_in || 600;
+    const deadline = Date.now() + expiresIn * 1000;
+    let attempt = 1;
+    while (pollRun.current === run && Date.now() < deadline) {
+      const remaining = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+      const timeout = Math.min(12, remaining);
+      setStatus([
+        "Waiting for Feishu approval...",
+        `Polling attempt ${attempt}`,
+        "This will save automatically after approval.",
+      ].join("\n"));
+      try {
+        const channel = await api("setup/feishu/qr/complete", {
+          method: "POST",
+          body: JSON.stringify({ ...payload, onboarding_timeout_sec: timeout, begin }),
+        });
+        if (pollRun.current !== run) return;
+        setQRBegin(null);
+        setStatus(`Feishu channel saved: ${channel.id}. Restarting assistant to load the connector...`);
+        await restartAfterSave(assistant.id);
+        setStatus(`Feishu channel saved: ${channel.id}. Assistant restarted.`);
+        setPolling(false);
+        await onDone();
+        return;
+      } catch (err) {
+        if (!String(err.message).toLowerCase().includes("timed out")) {
+          setPolling(false);
+          onError(err.message);
+          return;
+        }
+      }
+      attempt += 1;
+    }
+    if (pollRun.current === run) {
+      setPolling(false);
+      setStatus("Feishu approval expired. Start QR setup again.");
+    }
+  }
+
   async function restartAfterSave(id) {
     await api(`assistants/${id}/restart`, { method: "POST" });
   }
@@ -474,7 +512,7 @@ function FeishuSetup({ assistant, onDone, onError }) {
   const qrURL = qrBegin?.QRURL || qrBegin?.qr_url;
   const userCode = qrBegin?.UserCode || qrBegin?.user_code;
   const expiresIn = qrBegin?.ExpireIn || qrBegin?.expire_in;
-  const qrButtonLabel = qrBegin ? "Check and Save Channel" : "Start QR Setup";
+  const qrButtonLabel = qrBegin ? "Waiting for Approval" : "Start QR Setup";
 
   return (
     <form className="sheet-form" onSubmit={submit}>
@@ -495,10 +533,10 @@ function FeishuSetup({ assistant, onDone, onError }) {
           {qrURL && <a className="setup-link" href={qrURL} target="_blank" rel="noreferrer">Open Feishu setup</a>}
           {userCode && <div className="code-box"><span>User code</span><strong>{userCode}</strong></div>}
           {expiresIn && <p>Expires in about {expiresIn} seconds.</p>}
-          <button type="button" className="link-button" onClick={() => { setQRBegin(null); setStatus(""); }}>Start over</button>
+          <button type="button" className="link-button" onClick={() => { pollRun.current += 1; setPolling(false); setQRBegin(null); setStatus(""); }}>Start over</button>
         </div>
       )}
-      <button className="primary wide" type="submit" disabled={saving}>{saving ? "Working..." : mode === "qr" ? qrButtonLabel : "Save Feishu App"}</button>
+      <button className="primary wide" type="submit" disabled={saving || polling || (mode === "qr" && !!qrBegin)}>{saving || polling ? "Working..." : mode === "qr" ? qrButtonLabel : "Save Feishu App"}</button>
       {status && <pre className="progress-box">{status}</pre>}
     </form>
   );

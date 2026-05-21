@@ -177,6 +177,33 @@ func TestSupervisorAutostartAndLifecycleState(t *testing.T) {
 	if state.Running {
 		t.Fatalf("expected stopped state: %#v", state)
 	}
+	state, err = supervisor.Start(context.Background(), configDir)
+	if err != nil {
+		t.Fatalf("restart after stop: %v", err)
+	}
+	cancelCtx, cancelStart := context.WithCancel(context.Background())
+	state, err = supervisor.Start(cancelCtx, configDir)
+	if err != nil {
+		t.Fatalf("start with cancelable context: %v", err)
+	}
+	cancelStart()
+	time.Sleep(100 * time.Millisecond)
+	state, err = supervisor.Status(context.Background(), configDir)
+	if err != nil {
+		t.Fatalf("status after context cancellation: %v", err)
+	}
+	if !state.Running {
+		t.Fatalf("assistant should outlive request context cancellation: %#v", state)
+	}
+	stopCtx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	state, err = supervisor.Stop(stopCtx2, configDir)
+	if err != nil {
+		t.Fatalf("second stop: %v", err)
+	}
+	if state.LastError != "" {
+		t.Fatalf("intentional stop should not leave last error: %#v", state)
+	}
 }
 
 func TestValidateBindRequiresInsecureConfirmation(t *testing.T) {
