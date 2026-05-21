@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Foolyou/acp-assistant/internal/configspace"
+	"github.com/Foolyou/acp-assistant/internal/diagnostics"
 	"github.com/Foolyou/acp-assistant/internal/harness"
 	"github.com/Foolyou/acp-assistant/internal/im"
 	"github.com/Foolyou/acp-assistant/internal/model"
@@ -156,6 +157,13 @@ func (s *Server) handleAssistantAction(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && action == "status":
 		state, err := s.supervisor.Status(r.Context(), configDir)
 		writeJSON(w, state, err)
+	case r.Method == http.MethodGet && action == "doctor":
+		report := diagnostics.Collect(r.Context(), diagnostics.Options{
+			ConfigspacePath: configDir,
+			HomePath:        s.opts.Home,
+			LogLines:        20,
+		})
+		writeJSON(w, report, nil)
 	case r.Method == http.MethodPost && action == "start":
 		state, err := s.supervisor.Start(r.Context(), configDir)
 		writeJSON(w, state, err)

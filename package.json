@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "console:build": "node web/console/build.mjs",
+    "console:test": "node web/console/check.mjs",
+    "console:smoke": "playwright test web/console/smoke.spec.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "esbuild": "^0.27.2"
+  }
+}

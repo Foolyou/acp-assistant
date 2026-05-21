@@ -41,7 +41,7 @@ func TestServerStatusWritesMetadataAndServesConsole(t *testing.T) {
 		t.Fatalf("console status: %s", res.Status)
 	}
 	body, _ := io.ReadAll(res.Body)
-	if !strings.Contains(string(body), "Feishu QR Setup") || !strings.Contains(string(body), "setup/feishu/qr/begin") {
+	if !strings.Contains(string(body), "Start QR Setup") || !strings.Contains(string(body), "Run Doctor") {
 		t.Fatalf("console should expose Feishu QR setup flow")
 	}
 	cancel()
@@ -94,10 +94,10 @@ func TestServerSupportsForwardedPrefixForConsoleAndAPI(t *testing.T) {
 	}
 	body, _ := io.ReadAll(consoleRes.Body)
 	html := string(body)
-	if !strings.Contains(html, "const apiBase = new URL('api/', window.location.href);") {
+	if !strings.Contains(html, "api/") || !strings.Contains(html, "window.location.href") {
 		t.Fatalf("console should derive API base from current URL")
 	}
-	if strings.Contains(html, "api('/api/") {
+	if strings.Contains(html, "fetch(\"/api/") || strings.Contains(html, "fetch('/api/") {
 		t.Fatalf("console should not use root-relative API paths")
 	}
 
@@ -220,6 +220,32 @@ func TestCreateAssistantAndManualFeishuSetupPersistConfig(t *testing.T) {
 	}
 	if len(channels) != 1 || channels[0].Credentials["app_id"].Type != model.SecretFile {
 		t.Fatalf("unexpected channel config: %#v", channels)
+	}
+}
+
+func TestAssistantDoctorEndpointReturnsDiagnosticReport(t *testing.T) {
+	home := t.TempDir()
+	server := NewServer(ServerOptions{Home: home, Executable: os.Args[0], Bind: "127.0.0.1:0"})
+	cfg, err := server.createAssistant(context.Background(), CreateAssistantRequest{Name: "Doctor Alpha", Harness: model.ProviderCodex})
+	if err != nil {
+		t.Fatalf("create assistant: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "/api/assistants/doctor-alpha/doctor", nil)
+	rec := &responseRecorder{header: http.Header{}}
+	server.handleAssistantAction(rec, req)
+	if rec.status >= 400 {
+		t.Fatalf("doctor endpoint failed: status=%d body=%s", rec.status, rec.body.String())
+	}
+	var report struct {
+		AssistantID string `json:"assistant_id"`
+		Severity    string `json:"severity"`
+		Checks      []any  `json:"checks"`
+	}
+	if err := json.NewDecoder(&rec.body).Decode(&report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.AssistantID != cfg.ID || report.Severity == "" || len(report.Checks) == 0 {
+		t.Fatalf("unexpected report: %#v", report)
 	}
 }
 

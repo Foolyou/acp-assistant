@@ -13,6 +13,8 @@ CLAUDE.md
 *.log
 tmp/
 .worktrees/
+test-results/
+playwright-report/
 dist/
 build/
 node_modules/

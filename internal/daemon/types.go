@@ -32,6 +32,7 @@ type RegistryEntry struct {
 type AssistantState struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
+	Harness         string    `json:"harness,omitempty"`
 	ConfigspacePath string    `json:"configspace_path"`
 	WorkspacePath   string    `json:"workspace_path"`
 	Autostart       bool      `json:"autostart"`

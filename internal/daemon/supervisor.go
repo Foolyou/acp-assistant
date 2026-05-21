@@ -63,6 +63,7 @@ func (s *Supervisor) List(ctx context.Context) ([]AssistantState, error) {
 		if cfg, err := configspace.LoadAssistant(entry.ConfigspacePath); err == nil {
 			state.ID = cfg.ID
 			state.Name = cfg.Name
+			state.Harness = string(cfg.Harness.Provider)
 			state.WorkspacePath = cfg.WorkspacePath
 			state.ConfigspacePath = cfg.ConfigspacePath
 			state.Autostart = cfg.Autostart
@@ -227,6 +228,7 @@ func stateFromConfig(cfg model.AssistantConfig) AssistantState {
 	return AssistantState{
 		ID:              cfg.ID,
 		Name:            cfg.Name,
+		Harness:         string(cfg.Harness.Provider),
 		ConfigspacePath: cfg.ConfigspacePath,
 		WorkspacePath:   cfg.WorkspacePath,
 		Autostart:       cfg.Autostart,
