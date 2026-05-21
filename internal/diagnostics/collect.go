@@ -295,6 +295,9 @@ func harnessOptions(cfg model.AssistantConfig, home string) harnesspkg.ProfileOp
 		options.Env = map[string]string{"CODEX_HOME": filepath.Join(cfg.ConfigspacePath, "harness", "codex-home")}
 	case model.ProviderClaude:
 		options.ClaudePluginDir = filepath.Join(cfg.ConfigspacePath, "harness", "claude-plugin")
+		if claudePath, err := exec.LookPath("claude"); err == nil && strings.TrimSpace(claudePath) != "" {
+			options.Env = map[string]string{"CLAUDE_CODE_EXECUTABLE": claudePath}
+		}
 	}
 	return options
 }

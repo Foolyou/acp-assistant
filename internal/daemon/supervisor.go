@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -143,7 +144,7 @@ func (s *Supervisor) Start(ctx context.Context, configDir string) (AssistantStat
 	s.mu.Lock()
 	s.workers[cfg.ID] = w
 	s.mu.Unlock()
-	_ = os.WriteFile(filepath.Join(cfg.ConfigspacePath, "assistant.pid"), []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644)
+	_ = writeAssistantPID(cfg.ConfigspacePath, cmd.Process.Pid)
 	go func() {
 		err := cmd.Wait()
 		_ = outLog.Close()
@@ -157,7 +158,7 @@ func (s *Supervisor) Start(ctx context.Context, configDir string) (AssistantStat
 			if err != nil && wasRunning && !w.stopping {
 				w.lastError = err.Error()
 			}
-			_ = os.Remove(filepath.Join(cfg.ConfigspacePath, "assistant.pid"))
+			_ = removeAssistantPIDForPID(cfg.ConfigspacePath, w.pid)
 		}
 	}()
 	return w.state(), nil
@@ -174,7 +175,6 @@ func (s *Supervisor) Stop(ctx context.Context, configDir string) (AssistantState
 	if w == nil || !w.running || w.cmd == nil || w.cmd.Process == nil {
 		state := stateFromConfig(cfg)
 		state.LastStoppedAt = time.Now().UTC()
-		_ = os.Remove(filepath.Join(cfg.ConfigspacePath, "assistant.pid"))
 		return state, nil
 	}
 	s.mu.Lock()
@@ -193,7 +193,7 @@ func (s *Supervisor) Stop(ctx context.Context, configDir string) (AssistantState
 	w.lastStoppedAt = time.Now().UTC()
 	state := w.state()
 	s.mu.Unlock()
-	_ = os.Remove(filepath.Join(cfg.ConfigspacePath, "assistant.pid"))
+	_ = removeAssistantPIDForPID(cfg.ConfigspacePath, w.pid)
 	return state, nil
 }
 
@@ -253,6 +253,29 @@ func channelCount(configDir string) int {
 		return 0
 	}
 	return len(channels)
+}
+
+func assistantPIDPath(configDir string) string {
+	return filepath.Join(configDir, "assistant.pid")
+}
+
+func writeAssistantPID(configDir string, pid int) error {
+	return os.WriteFile(assistantPIDPath(configDir), []byte(strconv.Itoa(pid)+"\n"), 0o644)
+}
+
+func removeAssistantPIDForPID(configDir string, pid int) error {
+	data, err := os.ReadFile(assistantPIDPath(configDir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || current != pid {
+		return nil
+	}
+	return os.Remove(assistantPIDPath(configDir))
 }
 
 func RunningCount(states []AssistantState) int {

@@ -62,7 +62,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}()
 	err = s.httpServer.Serve(ln)
 	s.supervisor.Shutdown(context.Background())
-	_ = RemoveMetadata(s.opts.Home)
+	_ = RemoveMetadataForPID(s.opts.Home, os.Getpid())
 	if err == http.ErrServerClosed {
 		return nil
 	}

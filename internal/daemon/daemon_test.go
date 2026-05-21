@@ -127,6 +127,52 @@ func TestClientEnsureRunningUsesLazyStartup(t *testing.T) {
 	}
 }
 
+func TestMetadataCleanupSkipsNewerDaemonPID(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveMetadata(home, Metadata{PID: 200, Endpoint: "http://127.0.0.1:43791", Started: time.Now()}); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	if err := RemoveMetadataForPID(home, 100); err != nil {
+		t.Fatalf("remove old metadata: %v", err)
+	}
+	meta, err := LoadMetadata(home)
+	if err != nil {
+		t.Fatalf("metadata should remain for newer daemon: %v", err)
+	}
+	if meta.PID != 200 {
+		t.Fatalf("unexpected metadata after mismatched cleanup: %#v", meta)
+	}
+	if err := RemoveMetadataForPID(home, 200); err != nil {
+		t.Fatalf("remove matching metadata: %v", err)
+	}
+	if _, err := LoadMetadata(home); !os.IsNotExist(err) {
+		t.Fatalf("matching metadata should be removed, got %v", err)
+	}
+}
+
+func TestAssistantPIDCleanupSkipsNewerProcess(t *testing.T) {
+	configDir := t.TempDir()
+	if err := writeAssistantPID(configDir, 200); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := removeAssistantPIDForPID(configDir, 100); err != nil {
+		t.Fatalf("remove old pid: %v", err)
+	}
+	data, err := os.ReadFile(assistantPIDPath(configDir))
+	if err != nil {
+		t.Fatalf("pid file should remain for newer process: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "200" {
+		t.Fatalf("unexpected pid file: %q", string(data))
+	}
+	if err := removeAssistantPIDForPID(configDir, 200); err != nil {
+		t.Fatalf("remove matching pid: %v", err)
+	}
+	if _, err := os.Stat(assistantPIDPath(configDir)); !os.IsNotExist(err) {
+		t.Fatalf("matching pid should be removed, got %v", err)
+	}
+}
+
 func TestSupervisorAutostartAndLifecycleState(t *testing.T) {
 	if os.Getenv("ACPA_DAEMON_TEST_WORKER") == "1" {
 		select {}

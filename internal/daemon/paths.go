@@ -52,6 +52,20 @@ func RemoveMetadata(home string) error {
 	return err
 }
 
+func RemoveMetadataForPID(home string, pid int) error {
+	meta, err := LoadMetadata(home)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if meta.PID != pid {
+		return nil
+	}
+	return RemoveMetadata(home)
+}
+
 func LoadRegistry(home string) (Registry, error) {
 	data, err := os.ReadFile(RegistryPath(home))
 	if errors.Is(err, os.ErrNotExist) {

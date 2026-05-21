@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -47,10 +48,18 @@ func PrepareOverlay(cfg model.AssistantConfig, acpaHome string) (Overlay, error)
 		if err != nil {
 			return Overlay{}, err
 		}
-		return Overlay{ClaudePluginDir: pluginDir, PromptPrefix: prefix, ProcessDir: processDir}, nil
+		return Overlay{Env: claudeOverlayEnv(), ClaudePluginDir: pluginDir, PromptPrefix: prefix, ProcessDir: processDir}, nil
 	default:
 		return Overlay{PromptPrefix: prefix}, nil
 	}
+}
+
+func claudeOverlayEnv() map[string]string {
+	path, err := exec.LookPath("claude")
+	if err != nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return map[string]string{"CLAUDE_CODE_EXECUTABLE": path}
 }
 
 func prepareProcessDir(acpaHome string, cfg model.AssistantConfig, provider model.HarnessProvider) (string, error) {

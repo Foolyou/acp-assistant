@@ -138,6 +138,15 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	}
 
 	cfg.Harness.Provider = model.ProviderClaude
+	claudeBinDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(claudeBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claudeBin := filepath.Join(claudeBinDir, "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", claudeBinDir)
 	overlay, err = harness.PrepareOverlay(cfg, globalHome)
 	if err != nil {
 		t.Fatalf("prepare claude overlay: %v", err)
@@ -148,6 +157,9 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	}
 	if overlay.ProcessDir != filepath.Join(globalHome, "runtime-cwd", "alpha", "claude") {
 		t.Fatalf("unexpected claude process dir: %#v", overlay)
+	}
+	if overlay.Env["CLAUDE_CODE_EXECUTABLE"] != claudeBin {
+		t.Fatalf("expected claude executable env, got %#v", overlay.Env)
 	}
 	for _, path := range []string{
 		filepath.Join(claudePlugin, ".claude-plugin", "plugin.json"),
