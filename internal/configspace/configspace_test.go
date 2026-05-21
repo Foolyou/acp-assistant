@@ -45,6 +45,8 @@ func TestInitializeCreatesConfigspaceAndWorkspaceWithoutOverwritingMemory(t *tes
 		filepath.Join(configDir, "events.db"),
 		filepath.Join(configDir, "channels"),
 		filepath.Join(configDir, "secrets"),
+		filepath.Join(configDir, "instructions.md"),
+		filepath.Join(configDir, "skills"),
 		filepath.Join(workspace, "memory", "preferences.md"),
 		filepath.Join(workspace, "artifacts"),
 		filepath.Join(workspace, "inbox"),
@@ -68,6 +70,23 @@ func TestInitializeCreatesConfigspaceAndWorkspaceWithoutOverwritingMemory(t *tes
 	}
 	if loaded.ID != "alpha" || loaded.WorkspacePath != workspace || loaded.Harness.Provider != model.ProviderCodex {
 		t.Fatalf("loaded assistant mismatch: %#v", loaded)
+	}
+}
+
+func TestInitializeGlobalCreatesInstructionAndSkillSources(t *testing.T) {
+	home := t.TempDir()
+
+	if err := configspace.InitializeGlobal(home); err != nil {
+		t.Fatalf("initialize global sources: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(home, "global", "instructions.md"),
+		filepath.Join(home, "global", "skills"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
 	}
 }
 

@@ -45,6 +45,16 @@ func TestAssistantCreateInspectAndChannelOnboarding(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, "memory", "identity.md")); err != nil {
 		t.Fatalf("memory skeleton missing: %v", err)
 	}
+	for _, path := range []string{
+		filepath.Join(root, "home", "global", "instructions.md"),
+		filepath.Join(root, "home", "global", "skills"),
+		filepath.Join(configDir, "instructions.md"),
+		filepath.Join(configDir, "skills"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected instruction/skill source %s to exist: %v", path, err)
+		}
+	}
 
 	out.Reset()
 	if err := run(ctx, []string{"channel", "add", "feishu", "--configspace", configDir, "--id", "feishu-main", "--account-id", "main", "--app-id-env", "FEISHU_APP_ID", "--app-secret-env", "FEISHU_APP_SECRET", "--setup-url", "https://example.com/setup"}, strings.NewReader(""), &out, &out); err != nil {

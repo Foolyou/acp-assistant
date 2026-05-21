@@ -62,6 +62,28 @@ func TestRuntimeNewSessionIncludesMCPServers(t *testing.T) {
 	}
 }
 
+func TestRuntimeStartMergesConfiguredEnvironment(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "env_check")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeStartMergesConfiguredEnvironment")
+	rt := acp.NewRuntime(acp.Config{
+		Command:   cmd.Path,
+		Args:      cmd.Args[1:],
+		Workspace: t.TempDir(),
+		Env:       map[string]string{"ACPA_RUNTIME_CUSTOM_ENV": "from-runtime"},
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+}
+
 func TestRuntimeLoadSessionIncludesMCPServers(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()
@@ -87,6 +109,31 @@ func TestRuntimeLoadSessionIncludesMCPServers(t *testing.T) {
 	}
 	if sessionID != "loaded-external-session" {
 		t.Fatalf("unexpected session id: %q", sessionID)
+	}
+}
+
+func TestRuntimePromptPrependsConfiguredPrefix(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "prompt_prefix")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimePromptPrependsConfiguredPrefix")
+	rt := acp.NewRuntime(acp.Config{
+		Command:      cmd.Path,
+		Args:         cmd.Args[1:],
+		Workspace:    t.TempDir(),
+		PromptPrefix: "fixed instructions",
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+	if _, err := rt.Prompt(ctx, "session-1", "hello"); err != nil {
+		t.Fatalf("prompt: %v", err)
 	}
 }
 
@@ -198,6 +245,14 @@ func runACPHelperProcess() {
 		}
 		switch req.Method {
 		case "initialize":
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "env_check" && os.Getenv("ACPA_RUNTIME_CUSTOM_ENV") != "from-runtime" {
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"error":   map[string]any{"code": -32603, "message": "missing configured env"},
+				})
+				continue
+			}
 			_ = encoder.Encode(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
@@ -248,6 +303,29 @@ func runACPHelperProcess() {
 				"result":  map[string]any{"sessionId": "loaded-" + payload.SessionID},
 			})
 		case "session/prompt":
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix" {
+				var payload struct {
+					Prompt []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"prompt"`
+				}
+				_ = json.Unmarshal(req.Params, &payload)
+				if len(payload.Prompt) != 2 || payload.Prompt[0].Text != "fixed instructions" || payload.Prompt[1].Text != "hello" {
+					_ = encoder.Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"error":   map[string]any{"code": -32602, "message": "missing prompt prefix"},
+					})
+					continue
+				}
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result":  map[string]any{"stopReason": "end_turn"},
+				})
+				continue
+			}
 			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "permission_flush" {
 				_ = encoder.Encode(map[string]any{
 					"jsonrpc": "2.0",

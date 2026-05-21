@@ -155,6 +155,9 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 		Memory:          model.DefaultMemoryConfig(),
 		EventDBPath:     filepath.Join(absPath(*configDir), configspace.EventsDBFile),
 	}
+	if err := configspace.InitializeGlobal(defaultHome()); err != nil {
+		return err
+	}
 	if err := configspace.Initialize(ctx, cfg); err != nil {
 		return err
 	}
@@ -251,6 +254,9 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	cfg, err := configspace.LoadAssistant(configDir)
 	if err != nil {
+		return err
+	}
+	if err := configspace.InitializeGlobal(defaultHome()); err != nil {
 		return err
 	}
 	db, err := store.Open(cfg.EventDBPath)
@@ -629,7 +635,7 @@ func newRuntimeHarness(cfg model.AssistantConfig, db *store.Store) *runtimeHarne
 }
 
 func (h *runtimeHarness) EnsureSession(ctx context.Context, req assistant.EnsureSessionRequest) (assistant.EnsureSessionResult, error) {
-	profile, err := harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, req.PermissionMode, harnesspkg.ProfileOptions{Command: h.cfg.Harness.Command, Args: h.cfg.Harness.Args})
+	profile, err := h.launchProfile(req.PermissionMode)
 	if err != nil {
 		return assistant.EnsureSessionResult{}, err
 	}
@@ -666,7 +672,7 @@ func (h *runtimeHarness) Prompt(ctx context.Context, req assistant.PromptRequest
 	h.mu.Unlock()
 	if !ok {
 		var err error
-		profile, err = harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, model.PermissionManual, harnesspkg.ProfileOptions{Command: h.cfg.Harness.Command, Args: h.cfg.Harness.Args})
+		profile, err = h.launchProfile(model.PermissionManual)
 		if err != nil {
 			return assistant.PromptResult{}, err
 		}
@@ -683,7 +689,7 @@ func (h *runtimeHarness) Prompt(ctx context.Context, req assistant.PromptRequest
 }
 
 func (h *runtimeHarness) SwitchMode(ctx context.Context, req assistant.SwitchModeRequest) (assistant.SwitchModeResult, error) {
-	profile, err := harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, req.Mode, harnesspkg.ProfileOptions{Command: h.cfg.Harness.Command, Args: h.cfg.Harness.Args})
+	profile, err := h.launchProfile(req.Mode)
 	if err != nil {
 		return assistant.SwitchModeResult{}, err
 	}
@@ -724,6 +730,23 @@ func (h *runtimeHarness) ResolvePermission(ctx context.Context, shortID, option 
 	return reply(option)
 }
 
+func (h *runtimeHarness) launchProfile(mode model.PermissionMode) (harnesspkg.LaunchProfile, error) {
+	if strings.TrimSpace(h.cfg.ConfigspacePath) == "" {
+		return harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, mode, harnesspkg.ProfileOptions{Command: h.cfg.Harness.Command, Args: h.cfg.Harness.Args})
+	}
+	overlay, err := harnesspkg.PrepareOverlay(h.cfg, defaultHome())
+	if err != nil {
+		return harnesspkg.LaunchProfile{}, err
+	}
+	return harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, mode, harnesspkg.ProfileOptions{
+		Command:         h.cfg.Harness.Command,
+		Args:            h.cfg.Harness.Args,
+		Env:             overlay.Env,
+		ClaudePluginDir: overlay.ClaudePluginDir,
+		PromptPrefix:    overlay.PromptPrefix,
+	})
+}
+
 func (h *runtimeHarness) Stop() error {
 	for _, runtime := range h.runtimes {
 		runtime.Stop()
@@ -738,7 +761,9 @@ func (h *runtimeHarness) runtime(ctx context.Context, profile harnesspkg.LaunchP
 		runtime = acp.NewRuntime(acp.Config{
 			Command:      profile.Command,
 			Args:         profile.Args,
+			Env:          profile.Env,
 			Workspace:    h.cfg.WorkspacePath,
+			PromptPrefix: profile.PromptPrefix,
 			OnEvent:      h.handleACPEvent,
 			OnRequest:    h.handleACPRequest,
 			OnPromptText: h.handleACPPromptText,

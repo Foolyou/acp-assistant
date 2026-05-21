@@ -38,11 +38,13 @@ type Capabilities struct {
 }
 
 type Config struct {
-	Command   string
-	Args      []string
-	Workspace string
-	OnEvent   func(Event)
-	OnRequest func(Request) bool
+	Command      string
+	Args         []string
+	Env          map[string]string
+	Workspace    string
+	PromptPrefix string
+	OnEvent      func(Event)
+	OnRequest    func(Request) bool
 	// OnPromptText receives text that must be surfaced before the prompt completes,
 	// such as agent text emitted before a permission request pauses execution.
 	OnPromptText func(sessionID, text string)
@@ -106,6 +108,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 	r.mu.Unlock()
 	cmd := exec.CommandContext(ctx, r.cfg.Command, r.cfg.Args...)
+	if len(r.cfg.Env) > 0 {
+		cmd.Env = os.Environ()
+		for key, value := range r.cfg.Env {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -237,9 +245,14 @@ func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) (string, e
 	defer r.unregisterPromptCollector(sessionID, collector)
 
 	var result map[string]any
+	prompt := []map[string]any{}
+	if strings.TrimSpace(r.cfg.PromptPrefix) != "" {
+		prompt = append(prompt, map[string]any{"type": "text", "text": r.cfg.PromptPrefix})
+	}
+	prompt = append(prompt, map[string]any{"type": "text", "text": text})
 	if err := r.request(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
-		"prompt":    []map[string]any{{"type": "text", "text": text}},
+		"prompt":    prompt,
 	}, &result); err != nil {
 		return "", err
 	}

@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	AssistantFile = "assistant.yaml"
-	PoliciesFile  = "policies.yaml"
-	EventsDBFile  = "events.db"
+	AssistantFile    = "assistant.yaml"
+	InstructionsFile = "instructions.md"
+	PoliciesFile     = "policies.yaml"
+	EventsDBFile     = "events.db"
 )
 
 func Initialize(ctx context.Context, cfg model.AssistantConfig) error {
@@ -34,6 +35,7 @@ func Initialize(ctx context.Context, cfg model.AssistantConfig) error {
 		cfg.ConfigspacePath,
 		filepath.Join(cfg.ConfigspacePath, "channels"),
 		filepath.Join(cfg.ConfigspacePath, "secrets"),
+		filepath.Join(cfg.ConfigspacePath, "skills"),
 		cfg.WorkspacePath,
 		filepath.Join(cfg.WorkspacePath, "artifacts"),
 		filepath.Join(cfg.WorkspacePath, "inbox"),
@@ -59,6 +61,9 @@ func Initialize(ctx context.Context, cfg model.AssistantConfig) error {
 			return err
 		}
 	}
+	if err := ensureFile(filepath.Join(cfg.ConfigspacePath, InstructionsFile), assistantInstructionsSkeleton(cfg)); err != nil {
+		return err
+	}
 	if err := SaveAssistant(cfg.ConfigspacePath, cfg); err != nil {
 		return err
 	}
@@ -75,6 +80,17 @@ func Initialize(ctx context.Context, cfg model.AssistantConfig) error {
 	}
 	defer db.Close()
 	return db.Migrate(ctx)
+}
+
+func InitializeGlobal(home string) error {
+	if strings.TrimSpace(home) == "" {
+		return fmt.Errorf("ACPA home path is required")
+	}
+	globalDir := filepath.Join(home, "global")
+	if err := os.MkdirAll(filepath.Join(globalDir, "skills"), 0o755); err != nil {
+		return err
+	}
+	return ensureFile(filepath.Join(globalDir, InstructionsFile), "# Global ACPA Instructions\n\n")
 }
 
 func SaveAssistant(configDir string, cfg model.AssistantConfig) error {
@@ -264,6 +280,18 @@ func writeYAMLAtomic(path string, value any) error {
 	return os.Rename(tmpName, path)
 }
 
+func ensureFile(path, content string) error {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte(content), 0o644)
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
 func workspacePath(root, rel string) (string, error) {
 	clean := filepath.Clean(rel)
 	if filepath.IsAbs(clean) || clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
@@ -287,4 +315,15 @@ func workspacePath(root, rel string) (string, error) {
 func memorySkeleton(rel string) string {
 	name := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
 	return "# " + strings.Title(strings.ReplaceAll(name, "-", " ")) + "\n\n"
+}
+
+func assistantInstructionsSkeleton(cfg model.AssistantConfig) string {
+	name := strings.TrimSpace(cfg.Name)
+	if name == "" {
+		name = strings.TrimSpace(cfg.ID)
+	}
+	if name == "" {
+		name = "Assistant"
+	}
+	return fmt.Sprintf("# %s Instructions\n\n", name)
 }

@@ -12,6 +12,9 @@ type ProfileOptions struct {
 	ResponseMode    string
 	Command         string
 	Args            []string
+	Env             map[string]string
+	ClaudePluginDir string
+	PromptPrefix    string
 }
 
 type LaunchProfile struct {
@@ -20,6 +23,8 @@ type LaunchProfile struct {
 	PermissionMode model.PermissionMode  `json:"permission_mode"`
 	Command        string                `json:"command"`
 	Args           []string              `json:"args"`
+	Env            map[string]string     `json:"env,omitempty"`
+	PromptPrefix   string                `json:"prompt_prefix,omitempty"`
 }
 
 func ResolveLaunchProfile(provider model.HarnessProvider, mode model.PermissionMode, options ProfileOptions) (LaunchProfile, error) {
@@ -75,7 +80,7 @@ func codexProfile(mode model.PermissionMode, options ProfileOptions) (LaunchProf
 	if strings.TrimSpace(options.ResponseMode) != "" {
 		args = append(args, "-c", fmt.Sprintf("response_mode=%q", options.ResponseMode))
 	}
-	return LaunchProfile{Provider: model.ProviderCodex, Key: string(mode), PermissionMode: mode, Command: command, Args: args}, nil
+	return LaunchProfile{Provider: model.ProviderCodex, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix}, nil
 }
 
 func claudeProfile(mode model.PermissionMode, options ProfileOptions) (LaunchProfile, error) {
@@ -96,5 +101,19 @@ func claudeProfile(mode model.PermissionMode, options ProfileOptions) (LaunchPro
 	if mode == model.PermissionYolo {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	return LaunchProfile{Provider: model.ProviderClaude, Key: string(mode), PermissionMode: mode, Command: command, Args: args}, nil
+	if strings.TrimSpace(options.ClaudePluginDir) != "" {
+		args = append(args, "--plugin-dir", options.ClaudePluginDir)
+	}
+	return LaunchProfile{Provider: model.ProviderClaude, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix}, nil
+}
+
+func cloneEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(env))
+	for key, value := range env {
+		cloned[key] = value
+	}
+	return cloned
 }
