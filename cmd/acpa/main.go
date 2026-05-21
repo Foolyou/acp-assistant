@@ -104,6 +104,7 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 	fs.SetOutput(io.Discard)
 	name := fs.String("name", "", "assistant name")
 	id := fs.String("id", "", "assistant id")
+	rootPath := fs.String("root", "", "assistant root path containing workspace and config")
 	workspacePath := fs.String("workspace", "", "workspace path")
 	configDir := fs.String("configspace", "", "configspace path")
 	providerRaw := fs.String("harness", "codex", "harness provider: codex or claude")
@@ -123,12 +124,15 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 	if *name == "" {
 		*name = assistantID
 	}
-	cwd, _ := os.Getwd()
+	root := strings.TrimSpace(*rootPath)
+	if root == "" {
+		root = filepath.Join(defaultHome(), "assistants", assistantID)
+	}
 	if *workspacePath == "" {
-		*workspacePath = filepath.Join(cwd, assistantID+"-workspace")
+		*workspacePath = filepath.Join(root, "workspace")
 	}
 	if *configDir == "" {
-		*configDir = filepath.Join(defaultHome(), "assistants", assistantID)
+		*configDir = filepath.Join(root, "config")
 	}
 	provider := model.HarnessProvider(*providerRaw)
 	defaultCommand, defaultArgs, err := harnesspkg.DefaultCommand(provider)
@@ -380,6 +384,7 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 	}
 	fs := flag.NewFlagSet("channel add "+platformRaw, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	rootPath := fs.String("root", "", "assistant root path containing workspace and config")
 	configDir := fs.String("configspace", "", "configspace path")
 	id := fs.String("id", "", "channel id")
 	accountID := fs.String("account-id", "main", "account id")
@@ -399,8 +404,11 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *configDir == "" && *rootPath != "" {
+		*configDir = filepath.Join(*rootPath, "config")
+	}
 	if *configDir == "" {
-		return fmt.Errorf("--configspace is required")
+		return fmt.Errorf("--root or --configspace is required")
 	}
 	reader := bufio.NewReader(stdin)
 	if *id == "" {
@@ -967,6 +975,12 @@ func resolveConfigspace(args []string) (string, error) {
 		if strings.HasPrefix(arg, "--configspace=") {
 			return absPath(strings.TrimPrefix(arg, "--configspace=")), nil
 		}
+		if arg == "--root" && i+1 < len(args) {
+			return absPath(filepath.Join(args[i+1], "config")), nil
+		}
+		if strings.HasPrefix(arg, "--root=") {
+			return absPath(filepath.Join(strings.TrimPrefix(arg, "--root="), "config")), nil
+		}
 	}
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
@@ -1026,14 +1040,14 @@ func printOnboarding(platform model.Platform, setupURL string, stdout io.Writer)
 
 func printUsage(stdout io.Writer) {
 	fmt.Fprintln(stdout, `Usage:
-  acpa assistant create --name NAME --workspace PATH --configspace PATH --harness codex|claude
+  acpa assistant create --name NAME [--root PATH] [--harness codex|claude]
   acpa assistant list
-  acpa assistant inspect <assistant-id|--configspace PATH>
-  acpa assistant start <assistant-id|--configspace PATH> [--foreground]
-  acpa assistant stop <assistant-id|--configspace PATH>
-  acpa channel add feishu|qqbot --configspace PATH [credential flags]
-  acpa channel status <assistant-id|--configspace PATH>
-  acpa logs <assistant-id|--configspace PATH> [--follow]`)
+  acpa assistant inspect <assistant-id|--root PATH|--configspace PATH>
+  acpa assistant start <assistant-id|--root PATH|--configspace PATH> [--foreground]
+  acpa assistant stop <assistant-id|--root PATH|--configspace PATH>
+  acpa channel add feishu|qqbot --root PATH|--configspace PATH [credential flags]
+  acpa channel status <assistant-id|--root PATH|--configspace PATH>
+  acpa logs <assistant-id|--root PATH|--configspace PATH> [--follow]`)
 }
 
 func slug(value string) string {

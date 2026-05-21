@@ -70,6 +70,62 @@ func TestAssistantCreateInspectAndChannelOnboarding(t *testing.T) {
 	}
 }
 
+func TestChannelAddAcceptsRootPath(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("ACPA_HOME", filepath.Join(root, "home"))
+	t.Setenv("FEISHU_APP_ID", "app-id")
+	t.Setenv("FEISHU_APP_SECRET", "app-secret")
+
+	projectRoot := filepath.Join(root, "project")
+	if err := run(ctx, []string{"assistant", "create", "--name", "Root Channel", "--root", projectRoot, "--harness", "codex"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("assistant create: %v", err)
+	}
+	var out bytes.Buffer
+	if err := run(ctx, []string{"channel", "add", "feishu", "--root", projectRoot, "--id", "feishu-main", "--account-id", "main", "--app-id-env", "FEISHU_APP_ID", "--app-secret-env", "FEISHU_APP_SECRET"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("channel add with root: %v", err)
+	}
+	channels, err := configspace.LoadChannels(filepath.Join(projectRoot, "config"))
+	if err != nil {
+		t.Fatalf("load channels: %v", err)
+	}
+	if len(channels) != 1 || channels[0].ID != "feishu-main" {
+		t.Fatalf("unexpected channels: %#v", channels)
+	}
+}
+
+func TestAssistantCreateUsesRootLayoutAndDefaultHomeLayout(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("ACPA_HOME", filepath.Join(root, "home"))
+
+	projectRoot := filepath.Join(root, "project")
+	var out bytes.Buffer
+	if err := run(ctx, []string{"assistant", "create", "--name", "Rooted", "--root", projectRoot, "--harness", "codex"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("assistant create with root: %v", err)
+	}
+	cfg, err := configspace.LoadAssistant(filepath.Join(projectRoot, "config"))
+	if err != nil {
+		t.Fatalf("load rooted assistant: %v", err)
+	}
+	if cfg.ConfigspacePath != filepath.Join(projectRoot, "config") || cfg.WorkspacePath != filepath.Join(projectRoot, "workspace") {
+		t.Fatalf("unexpected rooted layout: %#v", cfg)
+	}
+
+	out.Reset()
+	if err := run(ctx, []string{"assistant", "create", "--name", "Defaulted", "--harness", "codex"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("assistant create with defaults: %v", err)
+	}
+	defaultRoot := filepath.Join(root, "home", "assistants", "defaulted")
+	cfg, err = configspace.LoadAssistant(filepath.Join(defaultRoot, "config"))
+	if err != nil {
+		t.Fatalf("load default assistant: %v", err)
+	}
+	if cfg.ConfigspacePath != filepath.Join(defaultRoot, "config") || cfg.WorkspacePath != filepath.Join(defaultRoot, "workspace") {
+		t.Fatalf("unexpected default layout: %#v", cfg)
+	}
+}
+
 func TestFeishuChannelAddCanUseQRRegistrationWithoutManualWebsocketURL(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
