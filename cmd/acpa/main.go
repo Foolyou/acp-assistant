@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +21,7 @@ import (
 	"github.com/Foolyou/acp-assistant/internal/acp"
 	"github.com/Foolyou/acp-assistant/internal/assistant"
 	"github.com/Foolyou/acp-assistant/internal/configspace"
+	"github.com/Foolyou/acp-assistant/internal/daemon"
 	harnesspkg "github.com/Foolyou/acp-assistant/internal/harness"
 	"github.com/Foolyou/acp-assistant/internal/im"
 	"github.com/Foolyou/acp-assistant/internal/model"
@@ -48,6 +48,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runAssistant(ctx, args[1:], stdin, stdout, stderr)
 	case "channel":
 		return runChannel(ctx, args[1:], stdin, stdout, stderr)
+	case "daemon":
+		return runDaemon(ctx, args[1:], stdin, stdout, stderr)
+	case "console":
+		return runConsole(ctx, args[1:], stdout)
 	case "logs":
 		return runLogs(ctx, args[1:], stdout)
 	case "help", "-h", "--help":
@@ -70,11 +74,17 @@ func runAssistant(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	case "inspect":
 		return assistantInspect(ctx, args[1:], stdout)
 	case "start":
-		return assistantStart(args[1:], stdout, stderr)
+		return assistantStart(ctx, args[1:], stdout, stderr)
 	case "serve":
 		return assistantServe(ctx, args[1:], stdout, stderr)
 	case "stop":
-		return assistantStop(args[1:], stdout)
+		return assistantStop(ctx, args[1:], stdout)
+	case "restart":
+		return assistantRestart(ctx, args[1:], stdout)
+	case "status":
+		return assistantLifecycleStatus(ctx, args[1:], stdout)
+	case "autostart":
+		return assistantAutostart(ctx, args[1:], stdout)
 	case "remove":
 		return assistantRemove(args[1:], stdout)
 	default:
@@ -97,6 +107,144 @@ func runChannel(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	default:
 		return fmt.Errorf("unknown channel subcommand %q", args[0])
 	}
+}
+
+func runDaemon(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("daemon subcommand is required")
+	}
+	switch args[0] {
+	case "start":
+		return daemonStart(ctx, args[1:], stdin, stdout, stderr)
+	case "run":
+		return daemonRun(ctx, args[1:], stdin, stdout)
+	case "stop":
+		client, err := daemonClient()
+		if err != nil {
+			return err
+		}
+		if err := client.StopDaemon(ctx); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "stopping daemon; supervised assistant serve processes receive SIGTERM")
+		return nil
+	case "restart":
+		if err := runDaemon(ctx, []string{"stop"}, stdin, stdout, stderr); err != nil {
+			return err
+		}
+		time.Sleep(300 * time.Millisecond)
+		return runDaemon(ctx, []string{"start"}, stdin, stdout, stderr)
+	case "status":
+		return daemonStatus(ctx, stdout)
+	default:
+		return fmt.Errorf("unknown daemon subcommand %q", args[0])
+	}
+}
+
+func daemonStart(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("daemon start", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	bind := fs.String("bind", daemon.DefaultBindAddress, "daemon bind address")
+	insecure := fs.Bool("insecure", false, "allow non-loopback daemon bind after confirmation")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	client, err := daemonClient()
+	if err != nil {
+		return err
+	}
+	if status, err := client.Status(ctx); err == nil {
+		fmt.Fprintf(stdout, "daemon already running at %s pid=%d\n", status.Endpoint, status.PID)
+		return nil
+	}
+	if err := daemon.ValidateBind(*bind, *insecure, stdin, stdout); err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	logPath := filepath.Join(defaultHome(), "daemon.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	runArgs := []string{"daemon", "run", "--bind", *bind}
+	if *insecure {
+		runArgs = append(runArgs, "--insecure", "--confirmed-insecure")
+	}
+	cmd := exec.Command(exe, runArgs...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+	_ = logFile.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := client.Status(ctx)
+		if err == nil {
+			fmt.Fprintf(stdout, "daemon started at %s pid=%d\n", status.Endpoint, status.PID)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon process started but readiness check failed")
+}
+
+func daemonRun(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("daemon run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	bind := fs.String("bind", daemon.DefaultBindAddress, "daemon bind address")
+	insecure := fs.Bool("insecure", false, "allow non-loopback daemon bind after confirmation")
+	confirmedInsecure := fs.Bool("confirmed-insecure", false, "internal: non-loopback bind was confirmed by daemon start")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*confirmedInsecure {
+		if err := daemon.ValidateBind(*bind, *insecure, stdin, stdout); err != nil {
+			return err
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	server := daemon.NewServer(daemon.ServerOptions{Home: defaultHome(), Executable: exe, Bind: *bind})
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return server.ListenAndServe(sigCtx)
+}
+
+func daemonStatus(ctx context.Context, stdout io.Writer) error {
+	client, err := daemonClient()
+	if err != nil {
+		return err
+	}
+	status, err := client.Status(ctx)
+	if err != nil {
+		fmt.Fprintln(stdout, "daemon: stopped")
+		return nil
+	}
+	fmt.Fprintf(stdout, "daemon: running\nendpoint: %s\npid: %d\nassistants: %d\nrunning: %d\nshutdown_policy: %s\n", status.Endpoint, status.PID, status.AssistantCount, status.RunningCount, status.ShutdownPolicy)
+	return nil
+}
+
+func runConsole(ctx context.Context, args []string, stdout io.Writer) error {
+	client, err := daemonClient()
+	if err != nil {
+		return err
+	}
+	status, err := client.EnsureRunning(ctx, "")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "console: %s/\n", strings.TrimRight(status.Endpoint, "/"))
+	return nil
 }
 
 func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error {
@@ -154,6 +302,7 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 		Harness:         model.HarnessBinding{Provider: provider, Command: *command, Args: argsValue},
 		Memory:          model.DefaultMemoryConfig(),
 		EventDBPath:     filepath.Join(absPath(*configDir), configspace.EventsDBFile),
+		Autostart:       true,
 	}
 	if err := configspace.InitializeGlobal(defaultHome()); err != nil {
 		return err
@@ -211,7 +360,7 @@ func assistantInspect(ctx context.Context, args []string, stdout io.Writer) erro
 	return nil
 }
 
-func assistantStart(args []string, stdout, stderr io.Writer) error {
+func assistantStart(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	configDir, err := resolveConfigspace(args)
 	if err != nil {
 		return err
@@ -219,31 +368,18 @@ func assistantStart(args []string, stdout, stderr io.Writer) error {
 	if hasArg(args, "--foreground") {
 		return assistantServe(context.Background(), []string{"--configspace", configDir}, stdout, stderr)
 	}
-	exe, err := os.Executable()
+	client, err := daemonClient()
 	if err != nil {
 		return err
 	}
-	outLog, err := os.OpenFile(filepath.Join(configDir, "acpa.out.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if _, err := client.EnsureRunning(ctx, ""); err != nil {
+		return err
+	}
+	state, err := client.StartAssistant(ctx, configDir)
 	if err != nil {
 		return err
 	}
-	errLog, err := os.OpenFile(filepath.Join(configDir, "acpa.err.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		_ = outLog.Close()
-		return err
-	}
-	cmd := exec.Command(exe, "assistant", "serve", "--configspace", configDir)
-	cmd.Stdout = outLog
-	cmd.Stderr = errLog
-	if err := cmd.Start(); err != nil {
-		_ = outLog.Close()
-		_ = errLog.Close()
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "assistant.pid"), []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "started assistant process pid=%d\n", cmd.Process.Pid)
+	fmt.Fprintf(stdout, "started assistant %s pid=%d\n", state.ID, state.PID)
 	return nil
 }
 
@@ -344,29 +480,99 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 	return nil
 }
 
-func assistantStop(args []string, stdout io.Writer) error {
+func assistantStop(ctx context.Context, args []string, stdout io.Writer) error {
 	configDir, err := resolveConfigspace(args)
 	if err != nil {
 		return err
 	}
-	pidFile := filepath.Join(configDir, "assistant.pid")
-	data, err := os.ReadFile(pidFile)
+	client, err := daemonClient()
 	if err != nil {
 		return err
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if _, err := client.EnsureRunning(ctx, ""); err != nil {
+		return err
+	}
+	state, err := client.StopAssistant(ctx, configDir)
 	if err != nil {
 		return err
 	}
-	proc, err := os.FindProcess(pid)
+	fmt.Fprintf(stdout, "stopped assistant %s\n", state.ID)
+	return nil
+}
+
+func assistantRestart(ctx context.Context, args []string, stdout io.Writer) error {
+	configDir, err := resolveConfigspace(args)
 	if err != nil {
 		return err
 	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	client, err := daemonClient()
+	if err != nil {
 		return err
 	}
-	_ = os.Remove(pidFile)
-	fmt.Fprintf(stdout, "stopped assistant process pid=%d\n", pid)
+	if _, err := client.EnsureRunning(ctx, ""); err != nil {
+		return err
+	}
+	state, err := client.RestartAssistant(ctx, configDir)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "restarted assistant %s pid=%d\n", state.ID, state.PID)
+	return nil
+}
+
+func assistantLifecycleStatus(ctx context.Context, args []string, stdout io.Writer) error {
+	configDir, err := resolveConfigspace(args)
+	if err != nil {
+		return err
+	}
+	client, err := daemonClient()
+	if err != nil {
+		return err
+	}
+	if _, err := client.EnsureRunning(ctx, ""); err != nil {
+		return err
+	}
+	state, err := client.AssistantStatus(ctx, configDir)
+	if err != nil {
+		return err
+	}
+	running := "stopped"
+	if state.Running {
+		running = fmt.Sprintf("running pid=%d", state.PID)
+	}
+	fmt.Fprintf(stdout, "id: %s\nstatus: %s\nautostart: %t\nlast_error: %s\n", state.ID, running, state.Autostart, state.LastError)
+	return nil
+}
+
+func assistantAutostart(ctx context.Context, args []string, stdout io.Writer) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: acpa assistant autostart enable|disable <assistant-id|--configspace PATH>")
+	}
+	enabled := false
+	switch args[0] {
+	case "enable":
+		enabled = true
+	case "disable":
+		enabled = false
+	default:
+		return fmt.Errorf("autostart action must be enable or disable")
+	}
+	configDir, err := resolveConfigspace(args[1:])
+	if err != nil {
+		return err
+	}
+	client, err := daemonClient()
+	if err != nil {
+		return err
+	}
+	if _, err := client.EnsureRunning(ctx, ""); err != nil {
+		return err
+	}
+	state, err := client.SetAutostart(ctx, configDir, enabled)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "assistant %s autostart=%t\n", state.ID, state.Autostart)
 	return nil
 }
 
@@ -1075,6 +1281,11 @@ func printUsage(stdout io.Writer) {
   acpa assistant inspect <assistant-id|--root PATH|--configspace PATH>
   acpa assistant start <assistant-id|--root PATH|--configspace PATH> [--foreground]
   acpa assistant stop <assistant-id|--root PATH|--configspace PATH>
+  acpa assistant restart <assistant-id|--root PATH|--configspace PATH>
+  acpa assistant status <assistant-id|--root PATH|--configspace PATH>
+  acpa assistant autostart enable|disable <assistant-id|--root PATH|--configspace PATH>
+  acpa daemon start|stop|restart|status
+  acpa console
   acpa channel add feishu|qqbot --root PATH|--configspace PATH [credential flags]
   acpa channel status <assistant-id|--root PATH|--configspace PATH>
   acpa logs <assistant-id|--root PATH|--configspace PATH> [--follow]`)
@@ -1107,6 +1318,14 @@ func defaultHome() string {
 		return ".acpa"
 	}
 	return filepath.Join(userHome, ".acpa")
+}
+
+func daemonClient() (daemon.Client, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return daemon.Client{}, err
+	}
+	return daemon.Client{Home: defaultHome(), Executable: exe}, nil
 }
 
 func registryPath() string {

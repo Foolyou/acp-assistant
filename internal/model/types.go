@@ -77,6 +77,7 @@ type AssistantConfig struct {
 	Harness         HarnessBinding `yaml:"harness" json:"harness"`
 	Memory          MemoryConfig   `yaml:"memory" json:"memory"`
 	EventDBPath     string         `yaml:"event_db_path" json:"event_db_path"`
+	Autostart       bool           `yaml:"autostart" json:"autostart"`
 }
 
 type MemoryConfig struct {
