@@ -267,6 +267,7 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	h := newRuntimeHarness(cfg, db)
 	sender := newConnectorSender()
+	h.sender = sender
 	rt := assistant.NewRuntime(assistant.RuntimeConfig{AssistantID: cfg.ID, Provider: cfg.Harness.Provider, Store: db, Harness: h, Sender: sender, Policy: policies, Memory: mem})
 	h.onPermission = func(ctx context.Context, localSessionID, acpRequestID string, options []string) (model.PendingPermission, error) {
 		return rt.RecordPermissionRequest(ctx, assistant.PermissionRequest{LocalSessionID: localSessionID, ACPRequestID: acpRequestID, Options: options, TimeoutResolution: "reject"})
@@ -599,6 +600,7 @@ func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
 type runtimeHarness struct {
 	cfg             model.AssistantConfig
 	store           *store.Store
+	sender          assistant.Sender
 	mu              sync.Mutex
 	runtimes        map[string]*acp.Runtime
 	sessionProfiles map[string]harnesspkg.LaunchProfile
@@ -726,11 +728,12 @@ func (h *runtimeHarness) runtime(ctx context.Context, profile harnesspkg.LaunchP
 	runtime := h.runtimes[profile.Key]
 	if runtime == nil {
 		runtime = acp.NewRuntime(acp.Config{
-			Command:   profile.Command,
-			Args:      profile.Args,
-			Workspace: h.cfg.WorkspacePath,
-			OnEvent:   h.handleACPEvent,
-			OnRequest: h.handleACPRequest,
+			Command:      profile.Command,
+			Args:         profile.Args,
+			Workspace:    h.cfg.WorkspacePath,
+			OnEvent:      h.handleACPEvent,
+			OnRequest:    h.handleACPRequest,
+			OnPromptText: h.handleACPPromptText,
 		})
 		h.runtimes[profile.Key] = runtime
 	}
@@ -748,6 +751,31 @@ func (h *runtimeHarness) rememberACPSession(acpSessionID, localSessionID string)
 	h.mu.Lock()
 	h.acpToLocal[acpSessionID] = localSessionID
 	h.mu.Unlock()
+}
+
+func (h *runtimeHarness) handleACPPromptText(acpSessionID, text string) {
+	if strings.TrimSpace(text) == "" || h.sender == nil || h.store == nil {
+		return
+	}
+	h.mu.Lock()
+	localSessionID := h.acpToLocal[acpSessionID]
+	h.mu.Unlock()
+	if localSessionID == "" {
+		return
+	}
+	session, err := h.store.SessionByID(context.Background(), localSessionID)
+	if err != nil {
+		return
+	}
+	_ = h.sender.Send(context.Background(), model.OutboundMessage{
+		AssistantID:      session.Binding.AssistantID,
+		Platform:         session.Binding.Platform,
+		AccountID:        session.Binding.AccountID,
+		PrivateChannelID: session.Binding.PrivateChannelID,
+		PlatformUserID:   session.Binding.PlatformUserID,
+		Text:             text,
+		CreatedAt:        time.Now().UTC(),
+	})
 }
 
 func (h *runtimeHarness) handleACPEvent(event acp.Event) {

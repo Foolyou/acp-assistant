@@ -15,6 +15,7 @@ import (
 	"github.com/Foolyou/acp-assistant/internal/assistant"
 	"github.com/Foolyou/acp-assistant/internal/configspace"
 	"github.com/Foolyou/acp-assistant/internal/model"
+	"github.com/Foolyou/acp-assistant/internal/store"
 )
 
 func TestAssistantCreateInspectAndChannelOnboarding(t *testing.T) {
@@ -154,6 +155,52 @@ func TestRuntimeHarnessLoadsStoredExternalSessionAfterRestart(t *testing.T) {
 	if result.ACPSessionID != "loaded-external-session" {
 		t.Fatalf("expected stored external session to be loaded, got %#v", result)
 	}
+}
+
+func TestRuntimeHarnessSendsPromptTextBeforePermission(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	binding := model.SessionBindingKey{
+		AssistantID:      "assistant-1",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+	}
+	session, err := db.CreateSession(ctx, binding, model.PermissionManual, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &captureSender{}
+	h := newRuntimeHarness(model.AssistantConfig{ID: "assistant-1"}, db)
+	h.sender = sender
+	h.rememberACPSession("acp-session-1", session.ID)
+
+	h.handleACPPromptText("acp-session-1", "before permission")
+
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one flushed prompt message, got %#v", sender.messages)
+	}
+	msg := sender.messages[0]
+	if msg.Text != "before permission" || msg.Platform != model.PlatformFeishu || msg.PrivateChannelID != "chat-a" || msg.PlatformUserID != "user-a" {
+		t.Fatalf("unexpected flushed prompt message: %#v", msg)
+	}
+}
+
+type captureSender struct {
+	messages []model.OutboundMessage
+}
+
+func (s *captureSender) Send(ctx context.Context, msg model.OutboundMessage) error {
+	s.messages = append(s.messages, msg)
+	return nil
 }
 
 func newFakeFeishuRegistrationServer(t *testing.T) *httptest.Server {

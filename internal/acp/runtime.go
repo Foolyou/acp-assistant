@@ -43,6 +43,9 @@ type Config struct {
 	Workspace string
 	OnEvent   func(Event)
 	OnRequest func(Request) bool
+	// OnPromptText receives text that must be surfaced before the prompt completes,
+	// such as agent text emitted before a permission request pauses execution.
+	OnPromptText func(sessionID, text string)
 }
 
 type Event struct {
@@ -323,6 +326,7 @@ func (r *Runtime) readLoop(stdout io.Reader) {
 
 func (r *Runtime) handleIncoming(id json.RawMessage, method string, params json.RawMessage) {
 	r.collectPromptChunk(method, params)
+	r.flushPromptTextBeforePermission(method, params)
 
 	switch method {
 	case "fs/read_text_file":
@@ -356,6 +360,23 @@ func (r *Runtime) handleIncoming(id json.RawMessage, method string, params json.
 			_ = r.sendRawResult(id, map[string]any{})
 		}
 	}
+}
+
+func (r *Runtime) flushPromptTextBeforePermission(method string, params json.RawMessage) {
+	if method != "session/request_permission" || r.cfg.OnPromptText == nil {
+		return
+	}
+	var payload struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(params, &payload); err != nil || payload.SessionID == "" {
+		return
+	}
+	text := r.flushPromptCollector(payload.SessionID)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	r.cfg.OnPromptText(payload.SessionID, text)
 }
 
 func (r *Runtime) registerPromptCollector(sessionID string) *promptCollector {
@@ -406,6 +427,24 @@ func (c *promptCollector) Append(text string) {
 	c.mu.Lock()
 	c.chunks = append(c.chunks, text)
 	c.mu.Unlock()
+}
+
+func (r *Runtime) flushPromptCollector(sessionID string) string {
+	r.mu.Lock()
+	collector := r.promptCollectors[sessionID]
+	r.mu.Unlock()
+	if collector == nil {
+		return ""
+	}
+	return collector.Flush()
+}
+
+func (c *promptCollector) Flush() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	text := strings.Join(c.chunks, "")
+	c.chunks = nil
+	return text
 }
 
 func (c *promptCollector) String() string {

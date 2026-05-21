@@ -118,6 +118,52 @@ func TestRuntimePromptReturnsAgentTextChunks(t *testing.T) {
 	}
 }
 
+func TestRuntimeFlushesCollectedTextBeforePermissionRequest(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "permission_flush")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeFlushesCollectedTextBeforePermissionRequest")
+	var flushed []string
+	rt := acp.NewRuntime(acp.Config{
+		Command:   cmd.Path,
+		Args:      cmd.Args[1:],
+		Workspace: t.TempDir(),
+		OnPromptText: func(sessionID, text string) {
+			if sessionID != "session-1" {
+				t.Fatalf("unexpected flushed session id: %s", sessionID)
+			}
+			flushed = append(flushed, text)
+		},
+		OnRequest: func(req acp.Request) bool {
+			if req.Method != "session/request_permission" {
+				return false
+			}
+			_ = req.Respond(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": "approved"}})
+			return true
+		},
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+
+	finalText, err := rt.Prompt(ctx, "session-1", "hello")
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if len(flushed) != 1 || flushed[0] != "BEFORE" {
+		t.Fatalf("expected text before permission to flush once, got %#v", flushed)
+	}
+	if finalText != "AFTER" {
+		t.Fatalf("expected final text to exclude flushed text, got %q", finalText)
+	}
+}
+
 func TestParseInitializeCapabilities(t *testing.T) {
 	caps, err := acp.ParseInitializeCapabilities([]byte(`{
 		"agentInfo": {"name": "fake"},
@@ -202,6 +248,47 @@ func runACPHelperProcess() {
 				"result":  map[string]any{"sessionId": "loaded-" + payload.SessionID},
 			})
 		case "session/prompt":
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "permission_flush" {
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "session/update",
+					"params": map[string]any{
+						"sessionId": "session-1",
+						"update": map[string]any{
+							"sessionUpdate": "agent_message_chunk",
+							"content":       map[string]any{"type": "text", "text": "BEFORE"},
+						},
+					},
+				})
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      900,
+					"method":  "session/request_permission",
+					"params": map[string]any{
+						"sessionId": "session-1",
+						"options":   []map[string]any{{"id": "approved"}, {"id": "abort"}},
+					},
+				})
+				var response map[string]json.RawMessage
+				_ = decoder.Decode(&response)
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "session/update",
+					"params": map[string]any{
+						"sessionId": "session-1",
+						"update": map[string]any{
+							"sessionUpdate": "agent_message_chunk",
+							"content":       map[string]any{"type": "text", "text": "AFTER"},
+						},
+					},
+				})
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result":  map[string]any{"stopReason": "end_turn"},
+				})
+				continue
+			}
 			_ = encoder.Encode(map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "session/update",
