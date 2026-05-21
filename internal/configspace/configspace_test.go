@@ -90,6 +90,24 @@ func TestInitializeGlobalCreatesInstructionAndSkillSources(t *testing.T) {
 	}
 }
 
+func TestEnsureAssistantSourcesCreatesFilesForExistingConfigspace(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "config")
+	cfg := model.AssistantConfig{ID: "alpha", Name: "Alpha", ConfigspacePath: configDir}
+
+	if err := configspace.EnsureAssistantSources(cfg); err != nil {
+		t.Fatalf("ensure assistant sources: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(configDir, "instructions.md"),
+		filepath.Join(configDir, "skills"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+	}
+}
+
 func TestChannelConfigRoundTripAndSecretResolution(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

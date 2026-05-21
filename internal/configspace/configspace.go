@@ -35,7 +35,6 @@ func Initialize(ctx context.Context, cfg model.AssistantConfig) error {
 		cfg.ConfigspacePath,
 		filepath.Join(cfg.ConfigspacePath, "channels"),
 		filepath.Join(cfg.ConfigspacePath, "secrets"),
-		filepath.Join(cfg.ConfigspacePath, "skills"),
 		cfg.WorkspacePath,
 		filepath.Join(cfg.WorkspacePath, "artifacts"),
 		filepath.Join(cfg.WorkspacePath, "inbox"),
@@ -61,7 +60,7 @@ func Initialize(ctx context.Context, cfg model.AssistantConfig) error {
 			return err
 		}
 	}
-	if err := ensureFile(filepath.Join(cfg.ConfigspacePath, InstructionsFile), assistantInstructionsSkeleton(cfg)); err != nil {
+	if err := EnsureAssistantSources(cfg); err != nil {
 		return err
 	}
 	if err := SaveAssistant(cfg.ConfigspacePath, cfg); err != nil {
@@ -91,6 +90,13 @@ func InitializeGlobal(home string) error {
 		return err
 	}
 	return ensureFile(filepath.Join(globalDir, InstructionsFile), "# Global ACPA Instructions\n\n")
+}
+
+func EnsureAssistantSources(cfg model.AssistantConfig) error {
+	if err := os.MkdirAll(filepath.Join(cfg.ConfigspacePath, "skills"), 0o755); err != nil {
+		return err
+	}
+	return ensureFile(filepath.Join(cfg.ConfigspacePath, InstructionsFile), assistantInstructionsSkeleton(cfg))
 }
 
 func SaveAssistant(configDir string, cfg model.AssistantConfig) error {

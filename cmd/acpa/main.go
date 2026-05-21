@@ -259,6 +259,9 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 	if err := configspace.InitializeGlobal(defaultHome()); err != nil {
 		return err
 	}
+	if err := configspace.EnsureAssistantSources(cfg); err != nil {
+		return err
+	}
 	db, err := store.Open(cfg.EventDBPath)
 	if err != nil {
 		return err
