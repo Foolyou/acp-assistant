@@ -104,7 +104,7 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 	if duplicate {
 		return nil
 	}
-	if strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
+	if isCommandText(msg.Text) {
 		return r.handleCommand(ctx, msg)
 	}
 	session, err := r.ensureActiveSession(ctx, key)
@@ -170,7 +170,7 @@ func (r *Runtime) RecordPermissionRequest(ctx context.Context, req PermissionReq
 		return model.PendingPermission{}, err
 	}
 	if r.cfg.Sender != nil {
-		text := fmt.Sprintf("Permission requested. Reply /approve %s or /reject %s.", permission.ShortApprovalID, permission.ShortApprovalID)
+		text := fmt.Sprintf("Permission requested. Reply approve %s to allow or reject %s to deny.", permission.ShortApprovalID, permission.ShortApprovalID)
 		_ = r.cfg.Sender.Send(ctx, model.OutboundMessage{
 			AssistantID:      session.Binding.AssistantID,
 			Platform:         session.Binding.Platform,
@@ -229,22 +229,24 @@ func (r *Runtime) handleCommand(ctx context.Context, msg model.InboundMessage) e
 	if len(fields) == 0 {
 		return nil
 	}
-	switch fields[0] {
-	case "/new":
+	command := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	switch command {
+	case "new":
 		return r.commandNew(ctx, msg.BindingKey())
-	case "/session":
+	case "session":
 		return r.commandSession(ctx, msg.BindingKey(), fields[1:])
-	case "/mode":
+	case "mode":
 		return r.commandMode(ctx, msg.BindingKey(), fields[1:])
-	case "/approve", "/reject":
+	case "approve", "reject":
 		if len(fields) != 2 {
-			return fmt.Errorf("%s requires an approval id", fields[0])
-		}
-		option := "approve"
-		if fields[0] == "/reject" {
-			option = "reject"
+			return fmt.Errorf("%s requires an approval id", command)
 		}
 		shortID := strings.ToUpper(fields[1])
+		permission, err := r.cfg.Store.PermissionByShortID(ctx, shortID)
+		if err != nil {
+			return err
+		}
+		option := permissionCommandOption(command, permission.Options)
 		if _, err := r.cfg.Store.ResolvePermission(ctx, shortID, msg.BindingKey(), option); err != nil {
 			return err
 		}
@@ -252,11 +254,51 @@ func (r *Runtime) handleCommand(ctx context.Context, msg model.InboundMessage) e
 			return resolver.ResolvePermission(ctx, shortID, option)
 		}
 		return nil
-	case "/memory":
+	case "memory":
 		return r.commandMemory(ctx, msg, fields)
 	default:
 		return fmt.Errorf("unknown command %s", fields[0])
 	}
+}
+
+func isCommandText(text string) bool {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) == 0 {
+		return false
+	}
+	if strings.HasPrefix(fields[0], "/") {
+		return true
+	}
+	switch strings.ToLower(fields[0]) {
+	case "new", "session", "mode", "approve", "reject", "memory":
+		return true
+	default:
+		return false
+	}
+}
+
+func permissionCommandOption(command string, options []string) string {
+	if command == "reject" {
+		return preferredPermissionOption(options, []string{"reject", "rejected", "deny", "denied", "abort"}, "reject")
+	}
+	return preferredPermissionOption(options, []string{"approve", "approved", "allow", "allowed", "accept", "accepted"}, "approve")
+}
+
+func preferredPermissionOption(options, preferred []string, fallback string) string {
+	if len(options) == 0 {
+		return fallback
+	}
+	for _, want := range preferred {
+		for _, option := range options {
+			if strings.EqualFold(option, want) {
+				return option
+			}
+		}
+	}
+	if fallback == "reject" {
+		return options[len(options)-1]
+	}
+	return options[0]
 }
 
 func (r *Runtime) commandNew(ctx context.Context, key model.SessionBindingKey) error {

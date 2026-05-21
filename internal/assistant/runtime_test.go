@@ -3,6 +3,7 @@ package assistant_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Foolyou/acp-assistant/internal/assistant"
@@ -11,7 +12,8 @@ import (
 )
 
 type fakeHarness struct {
-	prompts []assistant.PromptRequest
+	prompts             []assistant.PromptRequest
+	resolvedPermissions []string
 }
 
 func (f *fakeHarness) EnsureSession(ctx context.Context, req assistant.EnsureSessionRequest) (assistant.EnsureSessionResult, error) {
@@ -25,6 +27,11 @@ func (f *fakeHarness) Prompt(ctx context.Context, req assistant.PromptRequest) (
 
 func (f *fakeHarness) SwitchMode(ctx context.Context, req assistant.SwitchModeRequest) (assistant.SwitchModeResult, error) {
 	return assistant.SwitchModeResult{ACPSessionID: "switched-" + req.LocalSessionID, LaunchProfileKey: string(req.Mode)}, nil
+}
+
+func (f *fakeHarness) ResolvePermission(ctx context.Context, shortID, option string) error {
+	f.resolvedPermissions = append(f.resolvedPermissions, shortID+":"+option)
+	return nil
 }
 
 type fakeSender struct {
@@ -104,6 +111,9 @@ func TestRuntimeRoutesPrivateMessagesCommandsAndOwnerPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record permission: %v", err)
 	}
+	if len(s.messages) == 0 || strings.Contains(s.messages[len(s.messages)-1].Text, "/approve") || !strings.Contains(s.messages[len(s.messages)-1].Text, "approve "+perm.ShortApprovalID) {
+		t.Fatalf("permission prompt should use non-slash approval commands, got %#v", s.messages)
+	}
 	attacker := inbound
 	attacker.MessageID = "m3"
 	attacker.PlatformUserID = "user-b"
@@ -123,5 +133,74 @@ func TestRuntimeRoutesPrivateMessagesCommandsAndOwnerPermissions(t *testing.T) {
 	}
 	if resolved.ResolvedOption != "approve" {
 		t.Fatalf("permission was not approved: %#v", resolved)
+	}
+	if len(h.resolvedPermissions) != 1 || h.resolvedPermissions[0] != perm.ShortApprovalID+":approve" {
+		t.Fatalf("permission was not forwarded to harness: %#v", h.resolvedPermissions)
+	}
+}
+
+func TestRuntimeAcceptsBareApprovalAndMapsACPOptions(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+	inbound := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "hello",
+	}
+	if err := rt.HandleInbound(ctx, inbound); err != nil {
+		t.Fatalf("handle inbound: %v", err)
+	}
+	active, err := db.ActiveSessionForBinding(ctx, inbound.BindingKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	perm, err := rt.RecordPermissionRequest(ctx, assistant.PermissionRequest{
+		LocalSessionID:    active.ID,
+		ACPRequestID:      "req-1",
+		Options:           []string{"approved", "approved-execpolicy-amendment", "abort"},
+		TimeoutResolution: "abort",
+	})
+	if err != nil {
+		t.Fatalf("record permission: %v", err)
+	}
+
+	approval := inbound
+	approval.MessageID = "m2"
+	approval.Text = "approve " + perm.ShortApprovalID
+	if err := rt.HandleInbound(ctx, approval); err != nil {
+		t.Fatalf("bare approve command: %v", err)
+	}
+	resolved, err := db.PermissionByShortID(ctx, perm.ShortApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ResolvedOption != "approved" {
+		t.Fatalf("approval should map to ACP option, got %#v", resolved)
+	}
+	if len(h.resolvedPermissions) != 1 || h.resolvedPermissions[0] != perm.ShortApprovalID+":approved" {
+		t.Fatalf("permission was not forwarded with ACP option: %#v", h.resolvedPermissions)
 	}
 }
