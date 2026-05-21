@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,13 +29,16 @@ type Sender interface {
 }
 
 type RuntimeConfig struct {
-	AssistantID string
-	Provider    model.HarnessProvider
-	Store       *store.Store
-	Harness     Harness
-	Sender      Sender
-	Policy      model.PolicySet
-	Memory      *workspace.MemoryManager
+	AssistantID     string
+	Provider        model.HarnessProvider
+	Store           *store.Store
+	Harness         Harness
+	Sender          Sender
+	Policy          model.PolicySet
+	Memory          *workspace.MemoryManager
+	ChannelOptions  map[string]map[string]string
+	ACPAHome        string
+	ConfigspacePath string
 }
 
 type Runtime struct {
@@ -85,9 +89,37 @@ type PermissionRequest struct {
 	TimeoutResolution string
 }
 
+type commandErrorCategory string
+
+const (
+	commandErrorFailure          commandErrorCategory = "failure"
+	commandErrorUnknown          commandErrorCategory = "unknown"
+	commandErrorPermissionDenied commandErrorCategory = "permission_denied"
+)
+
+type commandResult struct {
+	Text string
+}
+
+type commandError struct {
+	Category commandErrorCategory
+	Message  string
+}
+
+func (e commandError) Error() string {
+	return e.Message
+}
+
 func NewRuntime(cfg RuntimeConfig) *Runtime {
 	if cfg.Policy.Assistant.AllowedModes == nil {
-		cfg.Policy = model.DefaultPolicySet()
+		defaults := model.DefaultPolicySet()
+		cfg.Policy.Assistant = defaults.Assistant
+		if cfg.Policy.Accounts == nil {
+			cfg.Policy.Accounts = defaults.Accounts
+		}
+		if cfg.Policy.Users == nil {
+			cfg.Policy.Users = defaults.Users
+		}
 	}
 	return &Runtime{cfg: cfg}
 }
@@ -105,12 +137,12 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 		return nil
 	}
 	if isCommandText(msg.Text) {
-		reply, err := r.handleCommand(ctx, msg)
+		result, err := r.handleCommand(ctx, msg)
 		if err != nil {
 			return r.sendCommandError(ctx, msg, err)
 		}
-		if strings.TrimSpace(reply) != "" {
-			return r.sendCommandReply(ctx, msg, reply)
+		if strings.TrimSpace(result.Text) != "" {
+			return r.sendCommandReply(ctx, msg, result.Text)
 		}
 		return nil
 	}
@@ -157,7 +189,20 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 }
 
 func (r *Runtime) sendCommandError(ctx context.Context, msg model.InboundMessage, commandErr error) error {
-	return r.sendCommandReply(ctx, msg, commandErr.Error())
+	var categorized commandError
+	if err, ok := commandErr.(commandError); ok {
+		categorized = err
+	} else {
+		categorized = commandError{Category: commandErrorFailure, Message: commandErr.Error()}
+	}
+	switch categorized.Category {
+	case commandErrorUnknown:
+		return r.sendCommandReply(ctx, msg, categorized.Message+"\nUse /help to see available commands.")
+	case commandErrorPermissionDenied:
+		return r.sendCommandReply(ctx, msg, categorized.Message)
+	default:
+		return r.sendCommandReply(ctx, msg, "Command failed: "+categorized.Message)
+	}
 }
 
 func (r *Runtime) sendCommandReply(ctx context.Context, msg model.InboundMessage, text string) error {
@@ -299,41 +344,66 @@ func (r *Runtime) ensureActiveSession(ctx context.Context, key model.SessionBind
 	return r.cfg.Store.CreateSession(ctx, key, mode, string(mode))
 }
 
-func (r *Runtime) handleCommand(ctx context.Context, msg model.InboundMessage) (string, error) {
+func (r *Runtime) handleCommand(ctx context.Context, msg model.InboundMessage) (commandResult, error) {
 	fields := strings.Fields(strings.TrimSpace(msg.Text))
 	if len(fields) == 0 {
-		return "", nil
+		return commandResult{}, nil
 	}
 	command := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	if !r.commandAllowed(msg.BindingKey(), command, fields[1:]) {
+		return commandResult{}, commandError{Category: commandErrorPermissionDenied, Message: "Owner permission is required for " + fields[0] + "."}
+	}
 	switch command {
+	case "help":
+		return commandResult{Text: r.commandHelp(msg.BindingKey())}, nil
+	case "status":
+		return r.commandStatus(ctx, msg.BindingKey())
+	case "skills":
+		return r.commandSkills(fields[1:], msg.BindingKey())
 	case "new":
-		return r.commandNew(ctx, msg.BindingKey())
+		text, err := r.commandNew(ctx, msg.BindingKey())
+		return commandResult{Text: text}, err
+	case "clear":
+		text, err := r.commandClear(ctx, msg.BindingKey())
+		return commandResult{Text: text}, err
 	case "session":
-		return r.commandSession(ctx, msg.BindingKey(), fields[1:])
+		text, err := r.commandSession(ctx, msg.BindingKey(), fields[1:])
+		return commandResult{Text: text}, err
 	case "mode":
-		return r.commandMode(ctx, msg.BindingKey(), fields[1:])
+		text, err := r.commandMode(ctx, msg.BindingKey(), fields[1:])
+		return commandResult{Text: text}, err
 	case "approve", "reject":
 		if len(fields) != 2 {
-			return "", fmt.Errorf("%s requires an approval id", command)
+			return commandResult{}, commandError{Category: commandErrorFailure, Message: command + " requires an approval id"}
 		}
 		shortID := strings.ToUpper(fields[1])
 		permission, err := r.cfg.Store.PermissionByShortID(ctx, shortID)
 		if err != nil {
-			return "", err
+			return commandResult{}, err
 		}
 		option := permissionCommandOption(command, permission.Options)
 		if _, err := r.cfg.Store.ResolvePermission(ctx, shortID, msg.BindingKey(), option); err != nil {
-			return "", err
+			return commandResult{}, err
 		}
 		if resolver, ok := r.cfg.Harness.(PermissionResolver); ok {
-			return "", resolver.ResolvePermission(ctx, shortID, option)
+			if err := resolver.ResolvePermission(ctx, shortID, option); err != nil {
+				return commandResult{}, err
+			}
 		}
-		return "", nil
+		return commandResult{Text: "Permission " + shortID + " " + permissionCommandPastTense(command) + "."}, nil
 	case "memory":
-		return r.commandMemory(ctx, msg, fields)
+		text, err := r.commandMemory(ctx, msg, fields)
+		return commandResult{Text: text}, err
 	default:
-		return "", fmt.Errorf("unknown command %s", fields[0])
+		return commandResult{}, commandError{Category: commandErrorUnknown, Message: "Unknown command " + fields[0] + "."}
 	}
+}
+
+func permissionCommandPastTense(command string) string {
+	if command == "reject" {
+		return "rejected"
+	}
+	return "approved"
 }
 
 func isCommandText(text string) bool {
@@ -345,7 +415,7 @@ func isCommandText(text string) bool {
 		return true
 	}
 	switch strings.ToLower(fields[0]) {
-	case "new", "session", "mode", "approve", "reject", "memory":
+	case "new", "clear", "session", "mode", "approve", "reject", "memory", "help", "status", "skills":
 		return true
 	default:
 		return false
@@ -385,6 +455,162 @@ func preferredPermissionOption(options, preferred []string, fallback string) str
 	return options[0]
 }
 
+func (r *Runtime) commandAllowed(key model.SessionBindingKey, command string, args []string) bool {
+	if command == "approve" || command == "reject" {
+		return true
+	}
+	if command == "skills" && len(args) > 0 && strings.EqualFold(args[0], "verbose") {
+		return r.isOwnerAdmin(key)
+	}
+	switch command {
+	case "mode", "memory":
+		return r.isOwnerAdmin(key)
+	default:
+		return true
+	}
+}
+
+func (r *Runtime) isOwnerAdmin(key model.SessionBindingKey) bool {
+	policy := r.effectivePolicy(key)
+	if policy.Admin || policy.CanSetDefaultMode {
+		return true
+	}
+	options := r.channelOptions(key)
+	for _, option := range []string{"owner_open_id", "owner_user_id", "admin_open_id", "admin_user_id"} {
+		if strings.TrimSpace(options[option]) != "" && options[option] == key.PlatformUserID {
+			return true
+		}
+	}
+	for _, option := range []string{"owner_open_ids", "owner_user_ids", "admin_open_ids", "admin_user_ids"} {
+		for _, value := range strings.Split(options[option], ",") {
+			if strings.TrimSpace(value) == key.PlatformUserID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *Runtime) channelOptions(key model.SessionBindingKey) map[string]string {
+	if r.cfg.ChannelOptions == nil {
+		return nil
+	}
+	if options, ok := r.cfg.ChannelOptions[key.AccountPolicyKey()]; ok {
+		return options
+	}
+	return nil
+}
+
+func (r *Runtime) commandHelp(key model.SessionBindingKey) string {
+	owner := r.isOwnerAdmin(key)
+	lines := []string{
+		"Available commands:",
+		"/help - show available commands",
+		"/status - show current session status",
+		"/session - list your sessions",
+		"/session <id> - switch to one of your sessions",
+		"/clear - start a fresh session",
+		"/skills - list effective skills",
+		"/approve <id> - approve a pending action",
+		"/reject <id> - reject a pending action",
+	}
+	if owner {
+		lines = append(lines,
+			"/mode <manual|yolo|full_auto> - change current session permission mode",
+			"/mode default <manual|yolo|full_auto> - change your default permission mode",
+			"/skills verbose - show skill source layers and paths",
+			"/memory set <target> <content> - update workspace memory",
+			"/memory rollback <target> <revision> - roll back workspace memory",
+		)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (r *Runtime) commandStatus(ctx context.Context, key model.SessionBindingKey) (commandResult, error) {
+	session, err := r.ensureActiveSession(ctx, key)
+	if err != nil {
+		return commandResult{}, err
+	}
+	pending, err := r.cfg.Store.PendingPermissionCountForOwner(ctx, key)
+	if err != nil {
+		return commandResult{}, err
+	}
+	connector := "unknown"
+	if status, err := r.cfg.Store.ConnectorStatus(ctx, key.AssistantID, key.Platform, key.AccountID); err == nil {
+		connector = string(status.State)
+		if strings.TrimSpace(status.Message) != "" {
+			connector += " - " + status.Message
+		}
+		if strings.TrimSpace(status.LastError) != "" {
+			connector += " - " + status.LastError
+		}
+	} else if err != sql.ErrNoRows {
+		return commandResult{}, err
+	}
+	lines := []string{
+		"Status:",
+		"session: " + session.ID,
+		"mode: " + string(session.PermissionMode),
+		"harness: " + string(r.cfg.Provider),
+		"connector: " + string(key.Platform) + "/" + key.AccountID + " " + connector,
+		fmt.Sprintf("pending permissions: %d", pending),
+	}
+	return commandResult{Text: strings.Join(lines, "\n")}, nil
+}
+
+func (r *Runtime) commandSkills(args []string, key model.SessionBindingKey) (commandResult, error) {
+	verbose := len(args) > 0 && strings.EqualFold(args[0], "verbose")
+	if len(args) > 0 && !verbose {
+		return commandResult{}, commandError{Category: commandErrorFailure, Message: "/skills supports only the optional verbose argument"}
+	}
+	skills, err := harnesspkg.ListSkills(r.cfg.ACPAHome, r.cfg.ConfigspacePath, r.cfg.Provider)
+	if err != nil {
+		return commandResult{}, err
+	}
+	if len(skills) == 0 {
+		return commandResult{Text: "No ACPA-managed skills are configured."}, nil
+	}
+	if !verbose {
+		lines := []string{"Effective skills:"}
+		for _, skill := range skills {
+			line := "- " + skill.Name
+			if skill.Description != "" {
+				line += ": " + skill.Description
+			}
+			lines = append(lines, line)
+		}
+		return commandResult{Text: strings.Join(lines, "\n")}, nil
+	}
+	_ = key
+	return commandResult{Text: verboseSkillsText(skills)}, nil
+}
+
+func verboseSkillsText(skills []model.SkillInfo) string {
+	byLayer := map[string][]model.SkillInfo{}
+	var layers []string
+	for _, skill := range skills {
+		if _, ok := byLayer[skill.Layer]; !ok {
+			layers = append(layers, skill.Layer)
+		}
+		byLayer[skill.Layer] = append(byLayer[skill.Layer], skill)
+	}
+	sort.Strings(layers)
+	lines := []string{"Effective skills (verbose):"}
+	for _, layer := range layers {
+		lines = append(lines, layer+":")
+		for _, skill := range byLayer[layer] {
+			lines = append(lines, "- "+skill.Name)
+			if skill.SourcePath != "" {
+				lines = append(lines, "  source: "+skill.SourcePath)
+			}
+			if skill.OverlayPath != "" {
+				lines = append(lines, "  overlay: "+skill.OverlayPath)
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (r *Runtime) commandNew(ctx context.Context, key model.SessionBindingKey) (string, error) {
 	mode, err := r.defaultMode(ctx, key)
 	if err != nil {
@@ -400,20 +626,36 @@ func (r *Runtime) commandNew(ctx context.Context, key model.SessionBindingKey) (
 	return "New session " + session.ID + " created with mode " + string(mode), nil
 }
 
+func (r *Runtime) commandClear(ctx context.Context, key model.SessionBindingKey) (string, error) {
+	mode, err := r.defaultMode(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	session, err := r.cfg.Store.CreateSession(ctx, key, mode, string(mode))
+	if err != nil {
+		return "", err
+	}
+	if err := r.cfg.Store.SetActiveSession(ctx, key, session.ID); err != nil {
+		return "", err
+	}
+	return "Cleared context. New session " + session.ID + " is active with mode " + string(mode) + ".", nil
+}
+
 func (r *Runtime) commandSession(ctx context.Context, key model.SessionBindingKey, args []string) (string, error) {
 	if len(args) == 0 {
 		sessions, err := r.cfg.Store.ListSessionsForBinding(ctx, key)
 		if err != nil {
 			return "", err
 		}
-		if r.cfg.Sender != nil {
-			var lines []string
-			for _, session := range sessions {
-				lines = append(lines, session.ID+" "+string(session.PermissionMode))
-			}
-			_ = r.cfg.Sender.Send(ctx, model.OutboundMessage{AssistantID: key.AssistantID, Platform: key.Platform, AccountID: key.AccountID, PrivateChannelID: key.PrivateChannelID, PlatformUserID: key.PlatformUserID, Text: strings.Join(lines, "\n"), CreatedAt: time.Now().UTC()})
+		if len(sessions) == 0 {
+			return "No sessions yet. Send a message or /clear to start one.", nil
 		}
-		return "", nil
+		var lines []string
+		lines = append(lines, "Sessions:")
+		for _, session := range sessions {
+			lines = append(lines, session.ID+" "+string(session.PermissionMode))
+		}
+		return strings.Join(lines, "\n"), nil
 	}
 	session, err := r.cfg.Store.SessionByID(ctx, args[0])
 	if err != nil {
@@ -437,17 +679,13 @@ func (r *Runtime) commandMode(ctx context.Context, key model.SessionBindingKey, 
 			return "", fmt.Errorf("/mode default requires a mode")
 		}
 		mode := model.PermissionMode(args[1])
-		policy := r.effectivePolicy(key)
-		if !policy.CanSetDefaultMode {
-			return "", fmt.Errorf("sender cannot set default mode")
-		}
 		if err := r.validateMode(key, mode); err != nil {
 			return "", err
 		}
 		if err := r.cfg.Store.SetBindingDefaultMode(ctx, key, mode); err != nil {
 			return "", err
 		}
-		return "Default mode set to " + string(mode), nil
+		return "Default mode set to " + string(mode) + ". " + modeHint(mode), nil
 	}
 	mode := model.PermissionMode(args[0])
 	if err := r.validateMode(key, mode); err != nil {
@@ -478,7 +716,20 @@ func (r *Runtime) commandMode(ctx context.Context, key model.SessionBindingKey, 
 	if err := r.cfg.Store.UpdateSessionMode(ctx, session.ID, mode, profile.Key); err != nil {
 		return "", err
 	}
-	return "Mode switched to " + string(mode), nil
+	return "Mode switched to " + string(mode) + ". " + modeHint(mode), nil
+}
+
+func modeHint(mode model.PermissionMode) string {
+	switch mode {
+	case model.PermissionManual:
+		return "Privileged actions will request authorization."
+	case model.PermissionYolo:
+		return "Subsequent actions may skip authorization; use only for trusted tasks."
+	case model.PermissionFullAuto:
+		return "The assistant will execute supported actions automatically when the harness allows it."
+	default:
+		return ""
+	}
 }
 
 func (r *Runtime) commandMemory(ctx context.Context, msg model.InboundMessage, fields []string) (string, error) {
@@ -551,6 +802,9 @@ func mergePolicy(base, override model.Policy) model.Policy {
 	}
 	if override.CanSetDefaultMode {
 		base.CanSetDefaultMode = true
+	}
+	if override.Admin {
+		base.Admin = true
 	}
 	return base
 }

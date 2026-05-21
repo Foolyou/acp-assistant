@@ -116,6 +116,7 @@ type Policy struct {
 	AllowedModes      []PermissionMode `yaml:"allowed_modes" json:"allowed_modes"`
 	DefaultMode       PermissionMode   `yaml:"default_mode" json:"default_mode"`
 	CanSetDefaultMode bool             `yaml:"can_set_default_mode" json:"can_set_default_mode"`
+	Admin             bool             `yaml:"admin,omitempty" json:"admin,omitempty"`
 }
 
 type PolicySet struct {
@@ -244,6 +245,14 @@ type StatusSnapshot struct {
 	PendingPermissions int               `json:"pending_permissions"`
 	RecentErrors       []Event           `json:"recent_errors"`
 	MemoryRevisions    []MemoryRevision  `json:"memory_revisions"`
+}
+
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Layer       string `json:"layer"`
+	SourcePath  string `json:"source_path,omitempty"`
+	OverlayPath string `json:"overlay_path,omitempty"`
 }
 
 type PendingPermission struct {

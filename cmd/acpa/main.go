@@ -286,13 +286,18 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 	h := newRuntimeHarness(cfg, db)
 	sender := newConnectorSender()
 	h.sender = sender
-	rt := assistant.NewRuntime(assistant.RuntimeConfig{AssistantID: cfg.ID, Provider: cfg.Harness.Provider, Store: db, Harness: h, Sender: sender, Policy: policies, Memory: mem})
-	h.onPermission = func(ctx context.Context, localSessionID, acpRequestID string, options []string) (model.PendingPermission, error) {
-		return rt.RecordPermissionRequest(ctx, assistant.PermissionRequest{LocalSessionID: localSessionID, ACPRequestID: acpRequestID, Options: options, TimeoutResolution: "reject"})
-	}
 	channels, err := configspace.LoadChannels(configDir)
 	if err != nil {
 		return err
+	}
+	channelOptions := map[string]map[string]string{}
+	for _, channel := range channels {
+		key := string(channel.Platform) + "/" + channel.AccountID
+		channelOptions[key] = channel.Options
+	}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{AssistantID: cfg.ID, Provider: cfg.Harness.Provider, Store: db, Harness: h, Sender: sender, Policy: policies, Memory: mem, ChannelOptions: channelOptions, ACPAHome: defaultHome(), ConfigspacePath: cfg.ConfigspacePath})
+	h.onPermission = func(ctx context.Context, localSessionID, acpRequestID string, options []string) (model.PendingPermission, error) {
+		return rt.RecordPermissionRequest(ctx, assistant.PermissionRequest{LocalSessionID: localSessionID, ACPRequestID: acpRequestID, Options: options, TimeoutResolution: "reject"})
 	}
 	var accounts []im.Account
 	for _, channel := range channels {
