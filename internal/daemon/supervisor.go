@@ -66,6 +66,7 @@ func (s *Supervisor) List(ctx context.Context) ([]AssistantState, error) {
 			state.Harness = string(cfg.Harness.Provider)
 			state.WorkspacePath = cfg.WorkspacePath
 			state.ConfigspacePath = cfg.ConfigspacePath
+			state.ChannelCount = channelCount(cfg.ConfigspacePath)
 			state.Autostart = cfg.Autostart
 		}
 		s.mu.Lock()
@@ -231,8 +232,17 @@ func stateFromConfig(cfg model.AssistantConfig) AssistantState {
 		Harness:         string(cfg.Harness.Provider),
 		ConfigspacePath: cfg.ConfigspacePath,
 		WorkspacePath:   cfg.WorkspacePath,
+		ChannelCount:    channelCount(cfg.ConfigspacePath),
 		Autostart:       cfg.Autostart,
 	}
+}
+
+func channelCount(configDir string) int {
+	channels, err := configspace.LoadChannels(configDir)
+	if err != nil {
+		return 0
+	}
+	return len(channels)
 }
 
 func RunningCount(states []AssistantState) int {

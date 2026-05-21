@@ -35,6 +35,7 @@ type AssistantState struct {
 	Harness         string    `json:"harness,omitempty"`
 	ConfigspacePath string    `json:"configspace_path"`
 	WorkspacePath   string    `json:"workspace_path"`
+	ChannelCount    int       `json:"channel_count"`
 	Autostart       bool      `json:"autostart"`
 	Running         bool      `json:"running"`
 	PID             int       `json:"pid,omitempty"`

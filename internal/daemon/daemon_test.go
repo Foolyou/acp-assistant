@@ -158,6 +158,9 @@ func TestSupervisorAutostartAndLifecycleState(t *testing.T) {
 	if !state.Running || state.PID == 0 {
 		t.Fatalf("unexpected start state: %#v", state)
 	}
+	if state.ChannelCount != 0 {
+		t.Fatalf("new assistant should start with no channels: %#v", state)
+	}
 	state, err = supervisor.SetAutostart(configDir, false)
 	if err != nil {
 		t.Fatalf("set autostart: %v", err)
@@ -220,6 +223,13 @@ func TestCreateAssistantAndManualFeishuSetupPersistConfig(t *testing.T) {
 	}
 	if len(channels) != 1 || channels[0].Credentials["app_id"].Type != model.SecretFile {
 		t.Fatalf("unexpected channel config: %#v", channels)
+	}
+	state, err := server.supervisor.Status(context.Background(), cfg.ConfigspacePath)
+	if err != nil {
+		t.Fatalf("assistant status: %v", err)
+	}
+	if state.ChannelCount != 1 {
+		t.Fatalf("expected one configured channel, got %#v", state)
 	}
 }
 

@@ -42,6 +42,11 @@ function statusTone(value) {
   return "bad";
 }
 
+function channelLabel(count) {
+  if (!count) return "No channels";
+  return `${count} channel${count === 1 ? "" : "s"}`;
+}
+
 function App() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -266,6 +271,7 @@ function AssistantCard({ assistant, active, busy, onSelect, onAction, onAutostar
       </div>
       <dl className="facts">
         <div><dt>Provider</dt><dd>{assistant.harness || "configured"}</dd></div>
+        <div><dt>Channels</dt><dd className={!assistant.channel_count ? "missing" : ""}>{channelLabel(assistant.channel_count)}</dd></div>
         <div><dt>Workspace</dt><dd title={assistant.workspace_path}>{compactPath(assistant.workspace_path)}</dd></div>
       </dl>
       <label className="toggle-row" onClick={(event) => event.stopPropagation()}>
@@ -293,6 +299,7 @@ function AssistantDetail({ assistant, onAction }) {
       <p className="detail-id">{assistant.id}</p>
       <dl className="detail-list">
         <div><dt>Status</dt><dd>{assistant.running ? `running pid ${assistant.pid}` : "stopped"}</dd></div>
+        <div><dt>Channels</dt><dd className={!assistant.channel_count ? "missing" : ""}>{channelLabel(assistant.channel_count)}</dd></div>
         <div><dt>Autostart</dt><dd>{assistant.autostart ? "enabled" : "disabled"}</dd></div>
         <div><dt>Workspace</dt><dd>{assistant.workspace_path}</dd></div>
         <div><dt>Configspace</dt><dd>{assistant.configspace_path}</dd></div>
