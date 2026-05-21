@@ -239,6 +239,42 @@ dd { margin: 0; overflow-wrap: anywhere; }
   background: var(--accent-bg);
   color: #164e63;
 }
+.qr-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #b7dce5;
+  border-radius: var(--radius);
+  background: var(--accent-bg);
+}
+.setup-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 9px 12px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  text-decoration: none;
+}
+.code-box {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.code-box span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.code-box strong { font-size: 20px; letter-spacing: 0; }
+.qr-panel p { color: #334155; }
 .confirm-box { display: grid; gap: 16px; }
 .doctor-panel { display: grid; gap: 12px; }
 .check-list { display: grid; gap: 8px; }
