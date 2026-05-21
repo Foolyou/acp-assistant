@@ -41,9 +41,66 @@ func TestServerStatusWritesMetadataAndServesConsole(t *testing.T) {
 		t.Fatalf("console status: %s", res.Status)
 	}
 	body, _ := io.ReadAll(res.Body)
-	if !strings.Contains(string(body), "Feishu QR Setup") || !strings.Contains(string(body), "/api/setup/feishu/qr/begin") {
+	if !strings.Contains(string(body), "Feishu QR Setup") || !strings.Contains(string(body), "setup/feishu/qr/begin") {
 		t.Fatalf("console should expose Feishu QR setup flow")
 	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("server shutdown: %v", err)
+	}
+}
+
+func TestServerSupportsForwardedPrefixForConsoleAndAPI(t *testing.T) {
+	home := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := NewServer(ServerOptions{Home: home, Executable: os.Args[0], Bind: "127.0.0.1:0"})
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(ctx) }()
+
+	client := waitForClient(t, home)
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, status.Endpoint+"/acp-assistant/api/status", nil)
+	req.Header.Set("X-Forwarded-Prefix", "/acp-assistant")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("prefixed status get: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("prefixed status code: %s", res.Status)
+	}
+	var prefixed Status
+	if err := json.NewDecoder(res.Body).Decode(&prefixed); err != nil {
+		t.Fatalf("decode prefixed status: %v", err)
+	}
+	if !prefixed.Reachable || prefixed.Endpoint == "" {
+		t.Fatalf("unexpected prefixed status: %#v", prefixed)
+	}
+
+	consoleReq, _ := http.NewRequest(http.MethodGet, status.Endpoint+"/acp-assistant/", nil)
+	consoleReq.Header.Set("X-Forwarded-Prefix", "/acp-assistant")
+	consoleRes, err := http.DefaultClient.Do(consoleReq)
+	if err != nil {
+		t.Fatalf("prefixed console get: %v", err)
+	}
+	defer consoleRes.Body.Close()
+	if consoleRes.StatusCode != http.StatusOK {
+		t.Fatalf("prefixed console status: %s", consoleRes.Status)
+	}
+	body, _ := io.ReadAll(consoleRes.Body)
+	html := string(body)
+	if !strings.Contains(html, "const apiBase = new URL('api/', window.location.href);") {
+		t.Fatalf("console should derive API base from current URL")
+	}
+	if strings.Contains(html, "api('/api/") {
+		t.Fatalf("console should not use root-relative API paths")
+	}
+
 	cancel()
 	if err := <-errCh; err != nil {
 		t.Fatalf("server shutdown: %v", err)

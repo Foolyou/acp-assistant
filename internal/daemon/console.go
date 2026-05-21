@@ -72,14 +72,18 @@ const consoleHTML = `<!doctype html>
     function h(value) {
       return String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
     }
+    const apiBase = new URL('api/', window.location.href);
+    function apiURL(path) {
+      return new URL(String(path).replace(/^\/+/, ''), apiBase).toString();
+    }
     async function api(path, options = {}) {
-      const res = await fetch(path, options);
+      const res = await fetch(apiURL(path), options);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
     }
     async function refresh() {
-      const status = await api('/api/status');
+      const status = await api('status');
       $('daemon').textContent = status.endpoint + ' - ' + status.running_count + '/' + status.assistant_count + ' running';
       $('assistants').innerHTML = status.assistants.map(a =>
         '<tr>' +
@@ -91,16 +95,16 @@ const consoleHTML = `<!doctype html>
         '</tr>').join('');
     }
     async function act(id, action) {
-      try { await api('/api/assistants/' + id + '/' + action, { method: 'POST' }); await refresh(); } catch (e) { $('message').textContent = e.message; }
+      try { await api('assistants/' + id + '/' + action, { method: 'POST' }); await refresh(); } catch (e) { $('message').textContent = e.message; }
     }
     async function setAutostart(id, enabled) {
-      try { await api('/api/assistants/' + id + '/autostart', { method: 'POST', body: JSON.stringify({ enabled }) }); await refresh(); } catch (e) { $('message').textContent = e.message; }
+      try { await api('assistants/' + id + '/autostart', { method: 'POST', body: JSON.stringify({ enabled }) }); await refresh(); } catch (e) { $('message').textContent = e.message; }
     }
     $('create-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = new FormData(event.target);
       try {
-        await api('/api/assistants', { method: 'POST', body: JSON.stringify({ name: form.get('name'), root_path: form.get('root_path'), harness: form.get('harness'), autostart: event.target.autostart.checked }) });
+        await api('assistants', { method: 'POST', body: JSON.stringify({ name: form.get('name'), root_path: form.get('root_path'), harness: form.get('harness'), autostart: event.target.autostart.checked }) });
         event.target.reset(); event.target.autostart.checked = true; await refresh();
       } catch (e) { $('message').textContent = e.message; }
     });
@@ -108,7 +112,7 @@ const consoleHTML = `<!doctype html>
       event.preventDefault();
       const form = new FormData(event.target);
       try {
-        await api('/api/setup/feishu/manual', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) });
+        await api('setup/feishu/manual', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) });
         await refresh();
       } catch (e) { $('message').textContent = e.message; }
     });
@@ -119,7 +123,7 @@ const consoleHTML = `<!doctype html>
       $('message').textContent = '';
       $('qr-status').textContent = 'Starting Feishu QR registration...';
       try {
-        const begin = await api('/api/setup/feishu/qr/begin', { method: 'POST', body: JSON.stringify(payload) });
+        const begin = await api('setup/feishu/qr/begin', { method: 'POST', body: JSON.stringify(payload) });
         const lines = [];
         const qrURL = begin.QRURL || begin.qr_url;
         const userCode = begin.UserCode || begin.user_code;
@@ -127,7 +131,7 @@ const consoleHTML = `<!doctype html>
         if (userCode) lines.push('User code: ' + userCode);
         lines.push('Waiting for Feishu registration approval...');
         $('qr-status').textContent = lines.join('\n');
-        const channel = await api('/api/setup/feishu/qr/complete', { method: 'POST', body: JSON.stringify({ ...payload, begin }) });
+        const channel = await api('setup/feishu/qr/complete', { method: 'POST', body: JSON.stringify({ ...payload, begin }) });
         $('qr-status').textContent = 'Feishu channel saved: ' + channel.id;
         await refresh();
       } catch (e) {

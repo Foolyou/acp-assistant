@@ -51,7 +51,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		_ = ln.Close()
 		return err
 	}
-	s.httpServer = &http.Server{Handler: mux}
+	s.httpServer = &http.Server{Handler: forwardedPrefixHandler(mux)}
 	go s.supervisor.StartAutostart(ctx)
 	go func() {
 		<-ctx.Done()
@@ -387,6 +387,43 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(consoleHTML))
+}
+
+func forwardedPrefixHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix := normalizeForwardedPrefix(r.Header.Get("X-Forwarded-Prefix"))
+		if prefix == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if r.URL.Path == prefix || strings.HasPrefix(r.URL.Path, prefix+"/") {
+			clone := r.Clone(r.Context())
+			urlCopy := *r.URL
+			urlCopy.Path = strings.TrimPrefix(r.URL.Path, prefix)
+			if urlCopy.Path == "" {
+				urlCopy.Path = "/"
+			}
+			urlCopy.RawPath = ""
+			clone.URL = &urlCopy
+			next.ServeHTTP(w, clone)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func normalizeForwardedPrefix(value string) string {
+	value = strings.TrimSpace(strings.Split(value, ",")[0])
+	if value == "" || !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "?#") {
+		return ""
+	}
+	value = "/" + strings.Trim(value, "/")
+	if value == "/" {
+		return ""
+	}
+	return value
 }
 
 func writeSecretFile(path, value string) error {
