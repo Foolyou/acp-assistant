@@ -12,6 +12,7 @@ CLAUDE.md
 # Runtime output
 *.log
 tmp/
+.worktrees/
 dist/
 build/
 node_modules/
