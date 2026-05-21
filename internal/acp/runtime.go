@@ -216,7 +216,11 @@ func (r *Runtime) LoadSession(ctx context.Context, sessionID string) (string, er
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := r.request(ctx, "session/load", map[string]any{"sessionId": sessionID, "cwd": r.cfg.Workspace}, &result); err != nil {
+	if err := r.request(ctx, "session/load", map[string]any{
+		"sessionId":  sessionID,
+		"cwd":        r.cfg.Workspace,
+		"mcpServers": []any{},
+	}, &result); err != nil {
 		return "", err
 	}
 	if result.SessionID == "" {

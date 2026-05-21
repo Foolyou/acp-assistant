@@ -624,14 +624,22 @@ func (h *runtimeHarness) EnsureSession(ctx context.Context, req assistant.Ensure
 	}
 	h.mu.Lock()
 	h.sessionProfiles[req.LocalSessionID] = profile
+	knownACPSession := req.CurrentACPSession != "" && h.acpToLocal[req.CurrentACPSession] != ""
 	h.mu.Unlock()
-	if req.CurrentACPSession != "" {
+	if knownACPSession {
 		h.rememberACPSession(req.CurrentACPSession, req.LocalSessionID)
 		return assistant.EnsureSessionResult{ACPSessionID: req.CurrentACPSession, ExternalSessionID: req.ExternalSessionID}, nil
 	}
 	runtime, err := h.runtime(ctx, profile)
 	if err != nil {
 		return assistant.EnsureSessionResult{}, err
+	}
+	if req.ExternalSessionID != "" && runtime.Capabilities().Session.LoadSession {
+		sessionID, err := runtime.LoadSession(ctx, req.ExternalSessionID)
+		if err == nil {
+			h.rememberACPSession(sessionID, req.LocalSessionID)
+			return assistant.EnsureSessionResult{ACPSessionID: sessionID, ExternalSessionID: req.ExternalSessionID}, nil
+		}
 	}
 	sessionID, err := runtime.NewSession(ctx)
 	if err != nil {

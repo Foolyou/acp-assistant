@@ -62,6 +62,34 @@ func TestRuntimeNewSessionIncludesMCPServers(t *testing.T) {
 	}
 }
 
+func TestRuntimeLoadSessionIncludesMCPServers(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeLoadSessionIncludesMCPServers")
+	rt := acp.NewRuntime(acp.Config{
+		Command:   cmd.Path,
+		Args:      cmd.Args[1:],
+		Workspace: t.TempDir(),
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+
+	sessionID, err := rt.LoadSession(ctx, "external-session")
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if sessionID != "loaded-external-session" {
+		t.Fatalf("unexpected session id: %q", sessionID)
+	}
+}
+
 func TestRuntimePromptReturnsAgentTextChunks(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()
@@ -128,7 +156,7 @@ func runACPHelperProcess() {
 				"jsonrpc": "2.0",
 				"id":      req.ID,
 				"result": map[string]any{
-					"agentCapabilities": map[string]any{},
+					"agentCapabilities": map[string]any{"loadSession": true},
 				},
 			})
 		case "session/new":
@@ -149,6 +177,29 @@ func runACPHelperProcess() {
 				"jsonrpc": "2.0",
 				"id":      req.ID,
 				"result":  map[string]any{"sessionId": "session-1"},
+			})
+		case "session/load":
+			var params map[string]json.RawMessage
+			_ = json.Unmarshal(req.Params, &params)
+			if _, ok := params["mcpServers"]; !ok {
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"error": map[string]any{
+						"code":    -32602,
+						"message": "missing field `mcpServers`",
+					},
+				})
+				continue
+			}
+			var payload struct {
+				SessionID string `json:"sessionId"`
+			}
+			_ = json.Unmarshal(req.Params, &payload)
+			_ = encoder.Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"sessionId": "loaded-" + payload.SessionID},
 			})
 		case "session/prompt":
 			_ = encoder.Encode(map[string]any{

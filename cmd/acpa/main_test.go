@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Foolyou/acp-assistant/internal/assistant"
 	"github.com/Foolyou/acp-assistant/internal/configspace"
 	"github.com/Foolyou/acp-assistant/internal/model"
 )
@@ -120,6 +122,40 @@ func TestFeishuChannelAddCanUseQRRegistrationWithoutManualWebsocketURL(t *testin
 	}
 }
 
+func TestRuntimeHarnessLoadsStoredExternalSessionAfterRestart(t *testing.T) {
+	if os.Getenv("ACPA_RUNTIME_HELPER") == "1" {
+		runRuntimeHarnessHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_RUNTIME_HELPER", "1")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeHarnessLoadsStoredExternalSessionAfterRestart")
+	h := newRuntimeHarness(model.AssistantConfig{
+		ID:            "assistant-1",
+		WorkspacePath: t.TempDir(),
+		Harness: model.HarnessBinding{
+			Provider: model.ProviderClaude,
+			Command:  cmd.Path,
+			Args:     cmd.Args[1:],
+		},
+	}, nil)
+	defer func() { _ = h.Stop() }()
+
+	result, err := h.EnsureSession(context.Background(), assistant.EnsureSessionRequest{
+		LocalSessionID:    "local-1",
+		PermissionMode:    model.PermissionManual,
+		LaunchProfileKey:  "manual",
+		CurrentACPSession: "stale-session",
+		ExternalSessionID: "external-session",
+	})
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if result.ACPSessionID != "loaded-external-session" {
+		t.Fatalf("expected stored external session to be loaded, got %#v", result)
+	}
+}
+
 func newFakeFeishuRegistrationServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -155,4 +191,45 @@ func newFakeFeishuRegistrationServer(t *testing.T) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "bot": map[string]string{"app_name": "Live Bot", "open_id": "ou_bot"}})
 	})
 	return httptest.NewServer(mux)
+}
+
+func runRuntimeHarnessHelperProcess() {
+	decoder := json.NewDecoder(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for {
+		var req struct {
+			ID     int             `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := decoder.Decode(&req); err != nil {
+			return
+		}
+		switch req.Method {
+		case "initialize":
+			_ = encoder.Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]any{
+					"agentCapabilities": map[string]any{"loadSession": true},
+				},
+			})
+		case "session/load":
+			var params struct {
+				SessionID string `json:"sessionId"`
+			}
+			_ = json.Unmarshal(req.Params, &params)
+			_ = encoder.Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"sessionId": "loaded-" + params.SessionID},
+			})
+		case "session/new":
+			_ = encoder.Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"sessionId": "new-session"},
+			})
+		}
+	}
 }
