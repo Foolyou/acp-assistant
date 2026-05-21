@@ -114,8 +114,20 @@ func SaveAssistant(configDir string, cfg model.AssistantConfig) error {
 
 func LoadAssistant(configDir string) (model.AssistantConfig, error) {
 	var cfg model.AssistantConfig
-	if err := readYAML(filepath.Join(configDir, AssistantFile), &cfg); err != nil {
+	path := filepath.Join(configDir, AssistantFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return model.AssistantConfig{}, err
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return model.AssistantConfig{}, err
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return model.AssistantConfig{}, err
+	}
+	if _, ok := raw["autostart"]; !ok {
+		cfg.Autostart = true
 	}
 	if cfg.Memory.Files == nil {
 		cfg.Memory = model.DefaultMemoryConfig()

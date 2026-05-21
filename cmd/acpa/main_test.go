@@ -46,6 +46,9 @@ func TestAssistantCreateInspectAndChannelOnboarding(t *testing.T) {
 	if cfg.ID != "demo-assistant" || cfg.Harness.Provider != model.ProviderCodex {
 		t.Fatalf("unexpected assistant config: %#v", cfg)
 	}
+	if !cfg.Autostart {
+		t.Fatalf("new assistants should default autostart=true")
+	}
 	if _, err := os.Stat(filepath.Join(workspace, "memory", "identity.md")); err != nil {
 		t.Fatalf("memory skeleton missing: %v", err)
 	}
