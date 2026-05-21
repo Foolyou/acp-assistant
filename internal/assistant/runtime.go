@@ -105,7 +105,10 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 		return nil
 	}
 	if isCommandText(msg.Text) {
-		return r.handleCommand(ctx, msg)
+		if err := r.handleCommand(ctx, msg); err != nil {
+			return r.sendCommandError(ctx, msg, err)
+		}
+		return nil
 	}
 	session, err := r.ensureActiveSession(ctx, key)
 	if err != nil {
@@ -147,6 +150,21 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 		})
 	}
 	return nil
+}
+
+func (r *Runtime) sendCommandError(ctx context.Context, msg model.InboundMessage, commandErr error) error {
+	if r.cfg.Sender == nil {
+		return commandErr
+	}
+	return r.cfg.Sender.Send(ctx, model.OutboundMessage{
+		AssistantID:      msg.AssistantID,
+		Platform:         msg.Platform,
+		AccountID:        msg.AccountID,
+		PrivateChannelID: msg.PrivateChannelID,
+		PlatformUserID:   msg.PlatformUserID,
+		Text:             commandErr.Error(),
+		CreatedAt:        time.Now().UTC(),
+	})
 }
 
 func (r *Runtime) RecordPermissionRequest(ctx context.Context, req PermissionRequest) (model.PendingPermission, error) {

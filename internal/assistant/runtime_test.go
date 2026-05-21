@@ -121,8 +121,12 @@ func TestRuntimeRoutesPrivateMessagesCommandsAndOwnerPermissions(t *testing.T) {
 	attacker.MessageID = "m3"
 	attacker.PlatformUserID = "user-b"
 	attacker.Text = "/approve " + perm.ShortApprovalID
-	if err := rt.HandleInbound(ctx, attacker); err == nil {
-		t.Fatal("non-owner approval should be rejected")
+	messageCount := len(s.messages)
+	if err := rt.HandleInbound(ctx, attacker); err != nil {
+		t.Fatalf("non-owner approval command error should be reported to sender: %v", err)
+	}
+	if len(s.messages) != messageCount+1 || !strings.Contains(s.messages[len(s.messages)-1].Text, "belongs to a different owner") {
+		t.Fatalf("non-owner approval should be rejected in chat, got %#v", s.messages[messageCount:])
 	}
 	owner := inbound
 	owner.MessageID = "m4"
@@ -205,6 +209,43 @@ func TestRuntimeAcceptsBareApprovalAndMapsACPOptions(t *testing.T) {
 	}
 	if len(h.resolvedPermissions) != 1 || h.resolvedPermissions[0] != perm.ShortApprovalID+":approved" {
 		t.Fatalf("permission was not forwarded with ACP option: %#v", h.resolvedPermissions)
+	}
+}
+
+func TestRuntimeReportsCommandErrorsToSender(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+	msg := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "/mode yolo",
+	}
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("command errors should be reported to sender, got returned error: %v", err)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "permission mode yolo is not allowed") {
+		t.Fatalf("expected command error message, got %#v", s.messages)
 	}
 }
 
