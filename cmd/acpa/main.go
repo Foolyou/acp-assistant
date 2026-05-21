@@ -185,10 +185,12 @@ func daemonStart(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	cmd := exec.Command(exe, runArgs...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return err
 	}
+	_ = cmd.Process.Release()
 	_ = logFile.Close()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
