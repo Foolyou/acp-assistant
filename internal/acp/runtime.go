@@ -59,13 +59,19 @@ type Request struct {
 }
 
 type Runtime struct {
-	cfg     Config
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	pending map[string]chan rpcResponse
-	nextID  atomic.Int64
-	caps    Capabilities
-	mu      sync.Mutex
+	cfg              Config
+	cmd              *exec.Cmd
+	stdin            io.WriteCloser
+	pending          map[string]chan rpcResponse
+	promptCollectors map[string]*promptCollector
+	nextID           atomic.Int64
+	caps             Capabilities
+	mu               sync.Mutex
+}
+
+type promptCollector struct {
+	mu     sync.Mutex
+	chunks []string
 }
 
 type rpcResponse struct {
@@ -79,7 +85,11 @@ type rpcError struct {
 }
 
 func NewRuntime(cfg Config) *Runtime {
-	return &Runtime{cfg: cfg, pending: map[string]chan rpcResponse{}}
+	return &Runtime{
+		cfg:              cfg,
+		pending:          map[string]chan rpcResponse{},
+		promptCollectors: map[string]*promptCollector{},
+	}
 }
 
 func (r *Runtime) Start(ctx context.Context) error {
@@ -155,7 +165,10 @@ func (r *Runtime) NewSession(ctx context.Context) (string, error) {
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := r.request(ctx, "session/new", map[string]any{"cwd": r.cfg.Workspace}, &result); err != nil {
+	if err := r.request(ctx, "session/new", map[string]any{
+		"cwd":        r.cfg.Workspace,
+		"mcpServers": []any{},
+	}, &result); err != nil {
 		return "", err
 	}
 	return result.SessionID, nil
@@ -212,12 +225,18 @@ func (r *Runtime) LoadSession(ctx context.Context, sessionID string) (string, er
 	return result.SessionID, nil
 }
 
-func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) error {
+func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) (string, error) {
+	collector := r.registerPromptCollector(sessionID)
+	defer r.unregisterPromptCollector(sessionID, collector)
+
 	var result map[string]any
-	return r.request(ctx, "session/prompt", map[string]any{
+	if err := r.request(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt":    []map[string]any{{"type": "text", "text": text}},
-	}, &result)
+	}, &result); err != nil {
+		return "", err
+	}
+	return collector.String(), nil
 }
 
 func (r *Runtime) Cancel(ctx context.Context, sessionID string) error {
@@ -299,6 +318,8 @@ func (r *Runtime) readLoop(stdout io.Reader) {
 }
 
 func (r *Runtime) handleIncoming(id json.RawMessage, method string, params json.RawMessage) {
+	r.collectPromptChunk(method, params)
+
 	switch method {
 	case "fs/read_text_file":
 		var req struct {
@@ -331,6 +352,62 @@ func (r *Runtime) handleIncoming(id json.RawMessage, method string, params json.
 			_ = r.sendRawResult(id, map[string]any{})
 		}
 	}
+}
+
+func (r *Runtime) registerPromptCollector(sessionID string) *promptCollector {
+	collector := &promptCollector{}
+	r.mu.Lock()
+	r.promptCollectors[sessionID] = collector
+	r.mu.Unlock()
+	return collector
+}
+
+func (r *Runtime) unregisterPromptCollector(sessionID string, collector *promptCollector) {
+	r.mu.Lock()
+	if r.promptCollectors[sessionID] == collector {
+		delete(r.promptCollectors, sessionID)
+	}
+	r.mu.Unlock()
+}
+
+func (r *Runtime) collectPromptChunk(method string, params json.RawMessage) {
+	if method != "session/update" {
+		return
+	}
+	var payload struct {
+		SessionID string `json:"sessionId"`
+		Update    struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			Content       struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"update"`
+	}
+	if err := json.Unmarshal(params, &payload); err != nil {
+		return
+	}
+	if payload.Update.SessionUpdate != "agent_message_chunk" || payload.Update.Content.Type != "text" {
+		return
+	}
+	r.mu.Lock()
+	collector := r.promptCollectors[payload.SessionID]
+	r.mu.Unlock()
+	if collector != nil {
+		collector.Append(payload.Update.Content.Text)
+	}
+}
+
+func (c *promptCollector) Append(text string) {
+	c.mu.Lock()
+	c.chunks = append(c.chunks, text)
+	c.mu.Unlock()
+}
+
+func (c *promptCollector) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.chunks, "")
 }
 
 func (r *Runtime) sendRawResult(id json.RawMessage, result any) error {

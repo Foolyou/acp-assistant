@@ -656,10 +656,11 @@ func (h *runtimeHarness) Prompt(ctx context.Context, req assistant.PromptRequest
 	if err != nil {
 		return assistant.PromptResult{}, err
 	}
-	if err := runtime.Prompt(ctx, req.ACPSessionID, req.Text); err != nil {
+	finalText, err := runtime.Prompt(ctx, req.ACPSessionID, req.Text)
+	if err != nil {
 		return assistant.PromptResult{}, err
 	}
-	return assistant.PromptResult{}, nil
+	return assistant.PromptResult{FinalText: finalText}, nil
 }
 
 func (h *runtimeHarness) SwitchMode(ctx context.Context, req assistant.SwitchModeRequest) (assistant.SwitchModeResult, error) {
