@@ -186,6 +186,19 @@ func (s *Store) ConnectorStatuses(ctx context.Context, assistantID string) ([]mo
 	return out, rows.Err()
 }
 
+func (s *Store) ConnectorStatus(ctx context.Context, assistantID string, platform model.Platform, accountID string) (model.ConnectorStatus, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT assistant_id, platform, account_id, state, message, last_error, updated_at FROM connector_status WHERE assistant_id = ? AND platform = ? AND account_id = ?`, assistantID, string(platform), accountID)
+	var status model.ConnectorStatus
+	var platformRaw, state, updated string
+	if err := row.Scan(&status.AssistantID, &platformRaw, &status.AccountID, &state, &status.Message, &status.LastError, &updated); err != nil {
+		return model.ConnectorStatus{}, err
+	}
+	status.Platform = model.Platform(platformRaw)
+	status.State = model.ConnectorState(state)
+	status.UpdatedAt = decodeTime(updated)
+	return status, nil
+}
+
 func (s *Store) RememberIdempotency(ctx context.Context, assistantID string, platform model.Platform, accountID, key string) (bool, error) {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO idempotency_keys(assistant_id, platform, account_id, key, created_at) VALUES (?, ?, ?, ?, ?)`,
 		assistantID, string(platform), accountID, key, encodeTime(time.Now().UTC()))
@@ -338,6 +351,13 @@ func (s *Store) CreatePermission(ctx context.Context, permission model.PendingPe
 func (s *Store) PermissionByShortID(ctx context.Context, shortID string) (model.PendingPermission, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, local_session_id, assistant_id, platform, account_id, private_channel_id, platform_user_id, conversation_key, thread_key, acp_request_id, options_json, short_approval_id, status, resolved_option, timeout_resolution, created_at, expires_at, resolved_at FROM permissions WHERE short_approval_id = ?`, shortID)
 	return scanPermission(row)
+}
+
+func (s *Store) PendingPermissionCountForOwner(ctx context.Context, owner model.SessionBindingKey) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM permissions WHERE assistant_id = ? AND platform = ? AND account_id = ? AND private_channel_id = ? AND platform_user_id = ? AND conversation_key = ? AND thread_key = ? AND status = 'pending'`,
+		owner.AssistantID, string(owner.Platform), owner.AccountID, owner.PrivateChannelID, owner.PlatformUserID, owner.ConversationKey, owner.ThreadKey).Scan(&count)
+	return count, err
 }
 
 func (s *Store) ResolvePermission(ctx context.Context, shortID string, owner model.SessionBindingKey, option string) (model.PendingPermission, error) {

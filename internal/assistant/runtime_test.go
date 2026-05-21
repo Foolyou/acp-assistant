@@ -2,6 +2,7 @@ package assistant_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,7 +213,7 @@ func TestRuntimeAcceptsBareApprovalAndMapsACPOptions(t *testing.T) {
 	}
 }
 
-func TestRuntimeReportsCommandErrorsToSender(t *testing.T) {
+func TestRuntimeReportsCommandOutcomesToSender(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
@@ -244,8 +245,41 @@ func TestRuntimeReportsCommandErrorsToSender(t *testing.T) {
 	if err := rt.HandleInbound(ctx, msg); err != nil {
 		t.Fatalf("command errors should be reported to sender, got returned error: %v", err)
 	}
-	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "permission mode yolo is not allowed") {
-		t.Fatalf("expected command error message, got %#v", s.messages)
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Owner permission is required") {
+		t.Fatalf("expected permission denied message, got %#v", s.messages)
+	}
+
+	unknown := msg
+	unknown.MessageID = "m2"
+	unknown.Text = "/wat"
+	if err := rt.HandleInbound(ctx, unknown); err != nil {
+		t.Fatalf("unknown command should be reported to sender: %v", err)
+	}
+	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Unknown command /wat") || !strings.Contains(s.messages[1].Text, "/help") {
+		t.Fatalf("expected unknown command help hint, got %#v", s.messages)
+	}
+
+	admin := msg
+	admin.MessageID = "m3"
+	admin.PlatformUserID = "admin-a"
+	admin.Text = "/mode yolo"
+	adminRT := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+			Users: map[string]model.Policy{
+				admin.BindingKey().UserPolicyKey(): {Admin: true},
+			},
+		},
+	})
+	if err := adminRT.HandleInbound(ctx, admin); err != nil {
+		t.Fatalf("failing command should be reported to sender: %v", err)
+	}
+	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, "Command failed: permission mode yolo is not allowed") {
+		t.Fatalf("expected command failure message, got %#v", s.messages)
 	}
 }
 
@@ -283,7 +317,7 @@ func TestRuntimeReportsModeSwitchSuccessToSender(t *testing.T) {
 	if err := rt.HandleInbound(ctx, msg); err != nil {
 		t.Fatalf("mode switch: %v", err)
 	}
-	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Mode switched to yolo") {
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Mode switched to yolo") || !strings.Contains(s.messages[0].Text, "skip authorization") {
 		t.Fatalf("expected mode switch confirmation, got %#v", s.messages)
 	}
 
@@ -293,8 +327,155 @@ func TestRuntimeReportsModeSwitchSuccessToSender(t *testing.T) {
 	if err := rt.HandleInbound(ctx, defaultMsg); err != nil {
 		t.Fatalf("default mode switch: %v", err)
 	}
-	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Default mode set to full_auto") {
+	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Default mode set to full_auto") || !strings.Contains(s.messages[1].Text, "automatically") {
 		t.Fatalf("expected default mode confirmation, got %#v", s.messages)
+	}
+}
+
+func TestRuntimeHelpStatusAndClearCommands(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+		ChannelOptions: map[string]map[string]string{
+			"feishu/main": {"owner_open_id": "owner-a"},
+		},
+	})
+	if err := db.UpsertConnectorStatus(ctx, model.ConnectorStatus{AssistantID: "alpha", Platform: model.PlatformFeishu, AccountID: "main", State: model.ConnectorStateConnected, Message: "ready"}); err != nil {
+		t.Fatalf("connector status: %v", err)
+	}
+	user := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "/help",
+	}
+	if err := rt.HandleInbound(ctx, user); err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if len(s.messages) != 1 || strings.Contains(s.messages[0].Text, "/mode ") || !strings.Contains(s.messages[0].Text, "/status") {
+		t.Fatalf("ordinary help should be filtered, got %#v", s.messages)
+	}
+	owner := user
+	owner.PlatformUserID = "owner-a"
+	owner.MessageID = "m2"
+	if err := rt.HandleInbound(ctx, owner); err != nil {
+		t.Fatalf("owner help: %v", err)
+	}
+	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "/mode ") || !strings.Contains(s.messages[1].Text, "/skills verbose") {
+		t.Fatalf("owner help should include owner commands, got %#v", s.messages)
+	}
+	status := user
+	status.MessageID = "m3"
+	status.Text = "/status"
+	if err := rt.HandleInbound(ctx, status); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, "session:") || !strings.Contains(s.messages[2].Text, "harness: codex") || !strings.Contains(s.messages[2].Text, "connector: feishu/main connected") {
+		t.Fatalf("status output missing expected fields, got %#v", s.messages)
+	}
+	clear := user
+	clear.MessageID = "m4"
+	clear.Text = "/clear"
+	if err := rt.HandleInbound(ctx, clear); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if len(s.messages) != 4 || !strings.Contains(s.messages[3].Text, "Cleared context. New session") {
+		t.Fatalf("clear should send explicit success, got %#v", s.messages)
+	}
+}
+
+func TestRuntimeSkillsCommandsReportSources(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	acpaHome := filepath.Join(root, "acpa")
+	configspace := filepath.Join(root, "config")
+	writeTestSkill(t, filepath.Join(acpaHome, "global", "skills", "global-one"), "global-one", "Global skill")
+	writeTestSkill(t, filepath.Join(configspace, "skills", "assistant-one"), "assistant-one", "Assistant skill")
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID:     "alpha",
+		Provider:        model.ProviderCodex,
+		Store:           db,
+		Sender:          s,
+		ACPAHome:        acpaHome,
+		ConfigspacePath: configspace,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+			Users: map[string]model.Policy{
+				"feishu/main/owner-a": {Admin: true},
+			},
+		},
+	})
+	user := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "/skills",
+	}
+	if err := rt.HandleInbound(ctx, user); err != nil {
+		t.Fatalf("skills: %v", err)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "global-one: Global skill") || !strings.Contains(s.messages[0].Text, "assistant-one: Assistant skill") || strings.Contains(s.messages[0].Text, "source:") {
+		t.Fatalf("skills output should list names and descriptions only, got %#v", s.messages)
+	}
+	verboseDenied := user
+	verboseDenied.MessageID = "m2"
+	verboseDenied.Text = "/skills verbose"
+	if err := rt.HandleInbound(ctx, verboseDenied); err != nil {
+		t.Fatalf("skills verbose denied: %v", err)
+	}
+	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Owner permission is required") {
+		t.Fatalf("verbose skills should require owner/admin, got %#v", s.messages)
+	}
+	owner := user
+	owner.MessageID = "m3"
+	owner.PlatformUserID = "owner-a"
+	owner.Text = "/skills verbose"
+	if err := rt.HandleInbound(ctx, owner); err != nil {
+		t.Fatalf("skills verbose: %v", err)
+	}
+	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, "global:") || !strings.Contains(s.messages[2].Text, "assistant:") || !strings.Contains(s.messages[2].Text, filepath.Join(configspace, "skills", "assistant-one")) || !strings.Contains(s.messages[2].Text, filepath.Join(configspace, "harness", "codex-home", "skills")) {
+		t.Fatalf("verbose skills should include source layers and paths, got %#v", s.messages)
+	}
+}
+
+func writeTestSkill(t *testing.T, dir, name, description string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir skill: %v", err)
+	}
+	content := "---\nname: " + name + "\ndescription: " + description + "\n---\n\nBody\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
 	}
 }
 
