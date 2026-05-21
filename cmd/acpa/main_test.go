@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,11 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Foolyou/acp-assistant/internal/assistant"
 	"github.com/Foolyou/acp-assistant/internal/configspace"
+	"github.com/Foolyou/acp-assistant/internal/diagnostics"
 	"github.com/Foolyou/acp-assistant/internal/model"
 	"github.com/Foolyou/acp-assistant/internal/store"
+	_ "modernc.org/sqlite"
 )
 
 func TestAssistantCreateInspectAndChannelOnboarding(t *testing.T) {
@@ -186,6 +190,141 @@ func TestFeishuChannelAddCanUseQRRegistrationWithoutManualWebsocketURL(t *testin
 	}
 	if strings.TrimSpace(string(appIDBytes)) != "cli_test" {
 		t.Fatalf("unexpected app id secret file: %q", string(appIDBytes))
+	}
+}
+
+func TestDoctorStatusAndLogsCommands(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("ACPA_HOME", filepath.Join(root, "home"))
+	configDir := filepath.Join(root, "assistant", "config")
+	workspace := filepath.Join(root, "assistant", "workspace")
+
+	if err := run(ctx, []string{"assistant", "create", "--name", "Diagnosed", "--workspace", workspace, "--configspace", configDir, "--harness", "codex", "--command", os.Args[0]}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("assistant create: %v", err)
+	}
+	cfg, err := configspace.LoadAssistant(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(cfg.EventDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := db.RecordEvent(ctx, model.Event{AssistantID: cfg.ID, Type: model.EventLifecycle, Scope: "assistant", Message: "started", At: now.Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEvent(ctx, model.Event{AssistantID: cfg.ID, Type: model.EventError, Scope: "connector", Message: "failed once", At: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "acpa.err.log"), []byte("first\nsecond\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := run(ctx, []string{"doctor", "--configspace", configDir}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("doctor text: %v", err)
+	}
+	if !strings.Contains(out.String(), "doctor:") || !strings.Contains(out.String(), "recent errors") || !strings.Contains(out.String(), "next actions") {
+		t.Fatalf("unexpected doctor text:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := run(ctx, []string{"doctor", "--configspace", configDir, "--verbose"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("doctor verbose: %v", err)
+	}
+	if !strings.Contains(out.String(), "Configspace") || !strings.Contains(out.String(), "log snippets:") {
+		t.Fatalf("unexpected verbose doctor text:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := run(ctx, []string{"doctor", cfg.ID, "--json"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("doctor json: %v", err)
+	}
+	var report diagnostics.Report
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("doctor json decode: %v\n%s", err, out.String())
+	}
+	if report.AssistantID != cfg.ID || len(report.Checks) == 0 || report.Severity == "" {
+		t.Fatalf("unexpected doctor report: %#v", report)
+	}
+
+	out.Reset()
+	if err := run(ctx, []string{"status", cfg.ID}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(out.String(), "id: diagnosed") || !strings.Contains(out.String(), "recent_errors: 1") {
+		t.Fatalf("unexpected status output:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := run(ctx, []string{"logs", cfg.ID, "--lines", "1"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	if strings.Contains(out.String(), "started") || !strings.Contains(out.String(), "failed once") {
+		t.Fatalf("expected bounded recent logs, got:\n%s", out.String())
+	}
+}
+
+func TestDoctorDefaultProbeDoesNotCreateSessionsSendMessagesOrModifyMemory(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("ACPA_HOME", filepath.Join(root, "home"))
+	configDir := filepath.Join(root, "config")
+	workspace := filepath.Join(root, "workspace")
+	if err := run(ctx, []string{"assistant", "create", "--name", "Side Effect Free", "--workspace", workspace, "--configspace", configDir, "--harness", "codex", "--command", os.Args[0]}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("assistant create: %v", err)
+	}
+	memoryPath := filepath.Join(workspace, "memory", "identity.md")
+	before, err := os.ReadFile(memoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infoBefore, err := os.Stat(memoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := run(ctx, []string{"doctor", "--configspace", configDir}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("doctor: %v\n%s", err, out.String())
+	}
+
+	after, err := os.ReadFile(memoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infoAfter, err := os.Stat(memoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || !infoAfter.ModTime().Equal(infoBefore.ModTime()) {
+		t.Fatalf("memory file changed during doctor")
+	}
+	sqlDB, err := sql.Open("sqlite", filepath.Join(configDir, "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	var sessions, outbound, memories int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM events WHERE type IN ('session', 'prompt', 'memory')`).Scan(&outbound); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM memory_revisions`).Scan(&memories); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 || outbound != 0 || memories != 0 {
+		t.Fatalf("doctor created user-visible state: sessions=%d events=%d memories=%d", sessions, outbound, memories)
 	}
 }
 

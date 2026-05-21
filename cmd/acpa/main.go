@@ -22,6 +22,7 @@ import (
 	"github.com/Foolyou/acp-assistant/internal/acp"
 	"github.com/Foolyou/acp-assistant/internal/assistant"
 	"github.com/Foolyou/acp-assistant/internal/configspace"
+	"github.com/Foolyou/acp-assistant/internal/diagnostics"
 	harnesspkg "github.com/Foolyou/acp-assistant/internal/harness"
 	"github.com/Foolyou/acp-assistant/internal/im"
 	"github.com/Foolyou/acp-assistant/internal/model"
@@ -48,6 +49,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runAssistant(ctx, args[1:], stdin, stdout, stderr)
 	case "channel":
 		return runChannel(ctx, args[1:], stdin, stdout, stderr)
+	case "doctor":
+		return runDoctor(ctx, args[1:], stdout)
+	case "status":
+		return runStatus(ctx, args[1:], stdout)
 	case "logs":
 		return runLogs(ctx, args[1:], stdout)
 	case "help", "-h", "--help":
@@ -573,12 +578,84 @@ func channelStatus(ctx context.Context, args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
-	configDir, err := resolveConfigspace(args)
+func runDoctor(ctx context.Context, args []string, stdout io.Writer) error {
+	opts, err := parseTopLevelOptions(args, true)
 	if err != nil {
 		return err
 	}
-	follow := hasArg(args, "--follow")
+	resolved, err := resolveConfigspaceFromFlags(opts.configspace, opts.root, opts.positional)
+	if err != nil {
+		return err
+	}
+	report := diagnostics.Collect(ctx, diagnostics.Options{ConfigspacePath: resolved, HomePath: defaultHome()})
+	if opts.jsonOutput {
+		return diagnostics.RenderJSON(stdout, report)
+	}
+	return diagnostics.RenderText(stdout, report, opts.verbose)
+}
+
+func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
+	opts, err := parseTopLevelOptions(args, false)
+	if err != nil {
+		return err
+	}
+	resolved, err := resolveConfigspaceFromFlags(opts.configspace, opts.root, opts.positional)
+	if err != nil {
+		return err
+	}
+	cfg, err := configspace.LoadAssistant(resolved)
+	if err != nil {
+		return err
+	}
+	channels, err := configspace.LoadChannels(resolved)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.EventDBPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		return err
+	}
+	snapshot, err := db.StatusSnapshot(ctx, cfg.ID)
+	if err != nil {
+		return err
+	}
+	statusByKey := map[string]model.ConnectorStatus{}
+	for _, status := range snapshot.Connectors {
+		statusByKey[string(status.Platform)+"/"+status.AccountID] = status
+	}
+	fmt.Fprintf(stdout, "id: %s\nname: %s\nharness: %s\nworkspace: %s\nconfigspace: %s\nchannels: %d\nactive_sessions: %d\npending_permissions: %d\nrecent_errors: %d\n",
+		cfg.ID, cfg.Name, cfg.Harness.Provider, cfg.WorkspacePath, cfg.ConfigspacePath, len(channels), snapshot.ActiveSessions, snapshot.PendingPermissions, len(snapshot.RecentErrors))
+	if len(channels) > 0 {
+		fmt.Fprintln(stdout, "connectors:")
+		for _, channel := range channels {
+			status := statusByKey[string(channel.Platform)+"/"+channel.AccountID]
+			state := string(status.State)
+			if state == "" {
+				state = "unknown"
+			}
+			fmt.Fprintf(stdout, "- %s/%s enabled=%t state=%s", channel.Platform, channel.AccountID, channel.Enabled, state)
+			if status.LastError != "" {
+				fmt.Fprintf(stdout, " error=%s", status.LastError)
+			}
+			fmt.Fprintln(stdout)
+		}
+	}
+	return nil
+}
+
+func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
+	opts, err := parseTopLevelOptions(args, false)
+	if err != nil {
+		return err
+	}
+	configDir, err := resolveConfigspaceFromFlags(opts.configspace, opts.root, opts.positional)
+	if err != nil {
+		return err
+	}
 	cfg, err := configspace.LoadAssistant(configDir)
 	if err != nil {
 		return err
@@ -592,6 +669,20 @@ func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	var lastID int64
+	recent, err := db.RecentEvents(ctx, cfg.ID, opts.lines)
+	if err != nil {
+		return err
+	}
+	for i := len(recent) - 1; i >= 0; i-- {
+		event := recent[i]
+		if event.ID > lastID {
+			lastID = event.ID
+		}
+		printLogEvent(stdout, event)
+	}
+	if !opts.follow {
+		return nil
+	}
 	for {
 		events, err := db.EventsAfter(ctx, cfg.ID, lastID, 100)
 		if err != nil {
@@ -601,10 +692,7 @@ func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
 			if event.ID > lastID {
 				lastID = event.ID
 			}
-			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", event.At.Format(time.RFC3339), event.Type, event.Scope, event.Message)
-		}
-		if !follow {
-			return nil
+			printLogEvent(stdout, event)
 		}
 		select {
 		case <-ctx.Done():
@@ -612,6 +700,10 @@ func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+func printLogEvent(stdout io.Writer, event model.Event) {
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", event.At.Format(time.RFC3339), event.Type, event.Scope, event.Message)
 }
 
 type runtimeHarness struct {
@@ -1032,6 +1124,78 @@ func resolveConfigspace(args []string) (string, error) {
 	return "", fmt.Errorf("--configspace or assistant id is required")
 }
 
+func resolveConfigspaceFromFlags(configDir, rootPath string, positional []string) (string, error) {
+	if strings.TrimSpace(configDir) != "" {
+		return absPath(configDir), nil
+	}
+	if strings.TrimSpace(rootPath) != "" {
+		return absPath(filepath.Join(rootPath, "config")), nil
+	}
+	return resolveConfigspace(positional)
+}
+
+type topLevelOptions struct {
+	configspace string
+	root        string
+	verbose     bool
+	jsonOutput  bool
+	follow      bool
+	lines       int
+	positional  []string
+}
+
+func parseTopLevelOptions(args []string, allowDoctorFlags bool) (topLevelOptions, error) {
+	opts := topLevelOptions{lines: 100}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--configspace":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("--configspace requires a path")
+			}
+			opts.configspace = args[i]
+		case strings.HasPrefix(arg, "--configspace="):
+			opts.configspace = strings.TrimPrefix(arg, "--configspace=")
+		case arg == "--root":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("--root requires a path")
+			}
+			opts.root = args[i]
+		case strings.HasPrefix(arg, "--root="):
+			opts.root = strings.TrimPrefix(arg, "--root=")
+		case arg == "--verbose" && allowDoctorFlags:
+			opts.verbose = true
+		case arg == "--json" && allowDoctorFlags:
+			opts.jsonOutput = true
+		case arg == "--follow":
+			opts.follow = true
+		case arg == "--lines":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("--lines requires a number")
+			}
+			lines, err := strconv.Atoi(args[i])
+			if err != nil || lines < 0 {
+				return opts, fmt.Errorf("--lines must be a non-negative number")
+			}
+			opts.lines = lines
+		case strings.HasPrefix(arg, "--lines="):
+			lines, err := strconv.Atoi(strings.TrimPrefix(arg, "--lines="))
+			if err != nil || lines < 0 {
+				return opts, fmt.Errorf("--lines must be a non-negative number")
+			}
+			opts.lines = lines
+		case strings.HasPrefix(arg, "-"):
+			return opts, fmt.Errorf("unknown flag %s", arg)
+		default:
+			opts.positional = append(opts.positional, arg)
+		}
+	}
+	return opts, nil
+}
+
 func hasArg(args []string, target string) bool {
 	for _, arg := range args {
 		if arg == target {
@@ -1077,7 +1241,9 @@ func printUsage(stdout io.Writer) {
   acpa assistant stop <assistant-id|--root PATH|--configspace PATH>
   acpa channel add feishu|qqbot --root PATH|--configspace PATH [credential flags]
   acpa channel status <assistant-id|--root PATH|--configspace PATH>
-  acpa logs <assistant-id|--root PATH|--configspace PATH> [--follow]`)
+  acpa doctor <assistant-id|--root PATH|--configspace PATH> [--verbose|--json]
+  acpa status <assistant-id|--root PATH|--configspace PATH>
+  acpa logs <assistant-id|--root PATH|--configspace PATH> [--lines N] [--follow]`)
 }
 
 func slug(value string) string {
