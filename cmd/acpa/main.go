@@ -1075,6 +1075,7 @@ func (h *runtimeHarness) runtime(ctx context.Context, profile harnesspkg.LaunchP
 			Workspace:    h.cfg.WorkspacePath,
 			ProcessDir:   profile.ProcessDir,
 			PromptPrefix: profile.PromptPrefix,
+			EffortLevel:  profile.EffortLevel,
 			OnEvent:      h.handleACPEvent,
 			OnRequest:    h.handleACPRequest,
 			OnPromptText: h.handleACPPromptText,

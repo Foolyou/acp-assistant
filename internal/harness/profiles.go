@@ -27,6 +27,7 @@ type LaunchProfile struct {
 	Env            map[string]string     `json:"env,omitempty"`
 	PromptPrefix   string                `json:"prompt_prefix,omitempty"`
 	ProcessDir     string                `json:"process_dir,omitempty"`
+	EffortLevel    string                `json:"effort_level,omitempty"`
 }
 
 func ResolveLaunchProfile(provider model.HarnessProvider, mode model.PermissionMode, options ProfileOptions) (LaunchProfile, error) {
@@ -106,7 +107,11 @@ func claudeProfile(mode model.PermissionMode, options ProfileOptions) (LaunchPro
 	if strings.TrimSpace(options.ClaudePluginDir) != "" {
 		args = append(args, "--plugin-dir", options.ClaudePluginDir)
 	}
-	return LaunchProfile{Provider: model.ProviderClaude, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix, ProcessDir: options.ProcessDir}, nil
+	effort := strings.TrimSpace(options.ReasoningEffort)
+	if effort == "" {
+		effort = "high"
+	}
+	return LaunchProfile{Provider: model.ProviderClaude, Key: string(mode), PermissionMode: mode, Command: command, Args: args, Env: cloneEnv(options.Env), PromptPrefix: options.PromptPrefix, ProcessDir: options.ProcessDir, EffortLevel: effort}, nil
 }
 
 func cloneEnv(env map[string]string) map[string]string {

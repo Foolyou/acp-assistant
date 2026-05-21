@@ -62,6 +62,32 @@ func TestRuntimeNewSessionIncludesMCPServers(t *testing.T) {
 	}
 }
 
+func TestRuntimeNewSessionAppliesConfiguredEffort(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "effort_config")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeNewSessionAppliesConfiguredEffort")
+	rt := acp.NewRuntime(acp.Config{
+		Command:     cmd.Path,
+		Args:        cmd.Args[1:],
+		Workspace:   t.TempDir(),
+		EffortLevel: "high",
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+
+	if _, err := rt.NewSession(ctx); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+}
+
 func TestRuntimeStartMergesConfiguredEnvironment(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()
@@ -340,6 +366,34 @@ func runACPHelperProcess() {
 				"jsonrpc": "2.0",
 				"id":      req.ID,
 				"result":  map[string]any{"sessionId": "session-1"},
+			})
+		case "session/set_config_option":
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") != "effort_config" {
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"error":   map[string]any{"code": -32601, "message": "unexpected set_config_option"},
+				})
+				continue
+			}
+			var payload struct {
+				SessionID string `json:"sessionId"`
+				ConfigID  string `json:"configId"`
+				Value     string `json:"value"`
+			}
+			_ = json.Unmarshal(req.Params, &payload)
+			if payload.SessionID != "session-1" || payload.ConfigID != "effort" || payload.Value != "high" {
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"error":   map[string]any{"code": -32602, "message": "unexpected effort config"},
+				})
+				continue
+			}
+			_ = encoder.Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"configOptions": []any{}},
 			})
 		case "session/load":
 			var params map[string]json.RawMessage

@@ -70,6 +70,18 @@ func TestLaunchProfilesApplyOverlayEnvAndPluginArgs(t *testing.T) {
 	}
 }
 
+func TestClaudeLaunchProfileAppliesReasoningEffort(t *testing.T) {
+	claude, err := harness.ResolveLaunchProfile(model.ProviderClaude, model.PermissionManual, harness.ProfileOptions{
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("resolve claude profile: %v", err)
+	}
+	if claude.EffortLevel != "high" {
+		t.Fatalf("expected claude effort level, got %#v", claude)
+	}
+}
+
 func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	root := t.TempDir()
 	globalHome := filepath.Join(root, "home")

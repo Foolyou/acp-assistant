@@ -485,6 +485,12 @@ func runRuntimeHarnessHelperProcess() {
 				"id":      req.ID,
 				"result":  map[string]any{"sessionId": "new-session"},
 			})
+		case "session/set_config_option":
+			_ = encoder.Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"configOptions": []any{}},
+			})
 		}
 	}
 }

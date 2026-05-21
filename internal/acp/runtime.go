@@ -44,6 +44,7 @@ type Config struct {
 	Workspace    string
 	ProcessDir   string
 	PromptPrefix string
+	EffortLevel  string
 	OnEvent      func(Event)
 	OnRequest    func(Request) bool
 	// OnPromptText receives text that must be surfaced before the prompt completes,
@@ -205,6 +206,9 @@ func (r *Runtime) NewSession(ctx context.Context) (string, error) {
 	}, &result); err != nil {
 		return "", err
 	}
+	if err := r.applyConfiguredEffort(ctx, result.SessionID); err != nil {
+		return "", err
+	}
 	return result.SessionID, nil
 }
 
@@ -260,7 +264,23 @@ func (r *Runtime) LoadSession(ctx context.Context, sessionID string) (string, er
 	if result.SessionID == "" {
 		result.SessionID = sessionID
 	}
+	if err := r.applyConfiguredEffort(ctx, result.SessionID); err != nil {
+		return "", err
+	}
 	return result.SessionID, nil
+}
+
+func (r *Runtime) applyConfiguredEffort(ctx context.Context, sessionID string) error {
+	effort := strings.TrimSpace(r.cfg.EffortLevel)
+	if effort == "" || sessionID == "" {
+		return nil
+	}
+	var result map[string]any
+	return r.request(ctx, "session/set_config_option", map[string]any{
+		"sessionId": sessionID,
+		"configId":  "effort",
+		"value":     effort,
+	}, &result)
 }
 
 func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) (string, error) {
