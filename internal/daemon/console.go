@@ -25,6 +25,7 @@ const consoleHTML = `<!doctype html>
     .stack { display: grid; gap: 20px; }
     .muted { color: #667789; }
     .error { color: #b42318; white-space: pre-wrap; }
+    .status { color: #136f63; white-space: pre-wrap; }
     @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px; } }
   </style>
 </head>
@@ -55,11 +56,22 @@ const consoleHTML = `<!doctype html>
         <label>App Secret <input name="app_secret" required type="password"></label>
         <button class="primary">Save Feishu App</button>
       </form>
+      <form id="feishu-qr-form">
+        <h2>Feishu QR Setup</h2>
+        <label>Assistant ID <input name="assistant_id" required></label>
+        <label>Channel ID <input name="channel_id" value="feishu-main"></label>
+        <label>Domain <select name="domain"><option value="feishu">Feishu</option><option value="lark">Lark</option></select></label>
+        <button class="primary">Start QR Setup</button>
+        <div id="qr-status" class="status"></div>
+      </form>
       <div id="message" class="error"></div>
     </div>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
+    function h(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    }
     async function api(path, options = {}) {
       const res = await fetch(path, options);
       const data = await res.json();
@@ -71,11 +83,11 @@ const consoleHTML = `<!doctype html>
       $('daemon').textContent = status.endpoint + ' - ' + status.running_count + '/' + status.assistant_count + ' running';
       $('assistants').innerHTML = status.assistants.map(a =>
         '<tr>' +
-        '<td><strong>' + a.name + '</strong><br><span class="muted">' + a.id + '</span></td>' +
-        '<td>' + a.workspace_path + '</td>' +
-        '<td>' + (a.running ? 'running pid ' + a.pid : 'stopped') + (a.last_error ? '<br><span class="error">' + a.last_error + '</span>' : '') + '</td>' +
-        '<td><input type="checkbox" ' + (a.autostart ? 'checked' : '') + ' onchange="setAutostart(\'' + a.id + '\', this.checked)"></td>' +
-        '<td><div class="actions"><button onclick="act(\'' + a.id + '\',\'start\')">Start</button><button onclick="act(\'' + a.id + '\',\'stop\')">Stop</button><button onclick="act(\'' + a.id + '\',\'restart\')">Restart</button></div></td>' +
+        '<td><strong>' + h(a.name) + '</strong><br><span class="muted">' + h(a.id) + '</span></td>' +
+        '<td>' + h(a.workspace_path) + '</td>' +
+        '<td>' + (a.running ? 'running pid ' + h(a.pid) : 'stopped') + (a.last_error ? '<br><span class="error">' + h(a.last_error) + '</span>' : '') + '</td>' +
+        '<td><input type="checkbox" ' + (a.autostart ? 'checked' : '') + ' onchange="setAutostart(\'' + h(a.id) + '\', this.checked)"></td>' +
+        '<td><div class="actions"><button onclick="act(\'' + h(a.id) + '\',\'start\')">Start</button><button onclick="act(\'' + h(a.id) + '\',\'stop\')">Stop</button><button onclick="act(\'' + h(a.id) + '\',\'restart\')">Restart</button></div></td>' +
         '</tr>').join('');
     }
     async function act(id, action) {
@@ -99,6 +111,29 @@ const consoleHTML = `<!doctype html>
         await api('/api/setup/feishu/manual', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) });
         await refresh();
       } catch (e) { $('message').textContent = e.message; }
+    });
+    $('feishu-qr-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const payload = Object.fromEntries(form.entries());
+      $('message').textContent = '';
+      $('qr-status').textContent = 'Starting Feishu QR registration...';
+      try {
+        const begin = await api('/api/setup/feishu/qr/begin', { method: 'POST', body: JSON.stringify(payload) });
+        const lines = [];
+        const qrURL = begin.QRURL || begin.qr_url;
+        const userCode = begin.UserCode || begin.user_code;
+        if (qrURL) lines.push('Scan URL: ' + qrURL);
+        if (userCode) lines.push('User code: ' + userCode);
+        lines.push('Waiting for Feishu registration approval...');
+        $('qr-status').textContent = lines.join('\n');
+        const channel = await api('/api/setup/feishu/qr/complete', { method: 'POST', body: JSON.stringify({ ...payload, begin }) });
+        $('qr-status').textContent = 'Feishu channel saved: ' + channel.id;
+        await refresh();
+      } catch (e) {
+        $('qr-status').textContent = '';
+        $('message').textContent = e.message;
+      }
     });
     refresh();
   </script>

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,6 +39,10 @@ func TestServerStatusWritesMetadataAndServesConsole(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("console status: %s", res.Status)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "Feishu QR Setup") || !strings.Contains(string(body), "/api/setup/feishu/qr/begin") {
+		t.Fatalf("console should expose Feishu QR setup flow")
 	}
 	cancel()
 	if err := <-errCh; err != nil {

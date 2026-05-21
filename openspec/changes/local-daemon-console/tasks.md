@@ -25,7 +25,7 @@
 - [x] 4.1 Add embedded Web assets served by the daemon
 - [x] 4.2 Add assistant list and lifecycle controls
 - [x] 4.3 Add assistant creation/setup flow
-- [ ] 4.4 Add Feishu QR onboarding flow with registration status
+- [x] 4.4 Add Feishu QR onboarding flow with registration status
 - [x] 4.5 Add manual existing Feishu app setup flow
 
 ## 5. Verification
