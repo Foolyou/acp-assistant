@@ -97,6 +97,17 @@ func NewRuntime(cfg Config) *Runtime {
 	}
 }
 
+func appendWithoutEnvKey(env []string, key string) []string {
+	prefix := key + "="
+	next := env[:0]
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			next = append(next, item)
+		}
+	}
+	return next
+}
+
 func (r *Runtime) Start(ctx context.Context) error {
 	if strings.TrimSpace(r.cfg.Command) == "" {
 		return fmt.Errorf("ACP command is required")
@@ -107,12 +118,17 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return nil
 	}
 	r.mu.Unlock()
+	workspace := strings.TrimSpace(r.cfg.Workspace)
 	cmd := exec.CommandContext(ctx, r.cfg.Command, r.cfg.Args...)
-	if strings.TrimSpace(r.cfg.Workspace) != "" {
-		cmd.Dir = r.cfg.Workspace
+	if workspace != "" {
+		cmd.Dir = workspace
 	}
 	if len(r.cfg.Env) > 0 {
 		cmd.Env = os.Environ()
+		if workspace != "" {
+			cmd.Env = appendWithoutEnvKey(cmd.Env, "PWD")
+			cmd.Env = append(cmd.Env, "PWD="+workspace)
+		}
 		for key, value := range r.cfg.Env {
 			cmd.Env = append(cmd.Env, key+"="+value)
 		}

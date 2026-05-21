@@ -98,6 +98,7 @@ func TestRuntimeStartUsesWorkspaceAsProcessDirectory(t *testing.T) {
 	rt := acp.NewRuntime(acp.Config{
 		Command:   cmd.Path,
 		Args:      cmd.Args[1:],
+		Env:       map[string]string{"ACPA_RUNTIME_CUSTOM_ENV": "from-runtime"},
 		Workspace: workspace,
 	})
 	ctx := context.Background()
@@ -271,11 +272,11 @@ func runACPHelperProcess() {
 			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "cwd_check" {
 				cwd, _ := os.Getwd()
 				expected := os.Getenv("ACPA_EXPECTED_CWD")
-				if cwd != expected {
+				if cwd != expected || os.Getenv("PWD") != expected {
 					_ = encoder.Encode(map[string]any{
 						"jsonrpc": "2.0",
 						"id":      req.ID,
-						"error":   map[string]any{"code": -32603, "message": "unexpected cwd: " + cwd},
+						"error":   map[string]any{"code": -32603, "message": "unexpected cwd or PWD: " + cwd + " / " + os.Getenv("PWD")},
 					})
 					continue
 				}
