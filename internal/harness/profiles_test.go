@@ -74,6 +74,14 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	root := t.TempDir()
 	globalHome := filepath.Join(root, "home")
 	configDir := filepath.Join(root, "config")
+	nativeCodexHome := filepath.Join(root, "native-codex")
+	t.Setenv("CODEX_HOME", nativeCodexHome)
+	if err := os.MkdirAll(nativeCodexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeCodexHome, "auth.json"), []byte(`{"token":"redacted"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(globalHome, "global", "skills", "global-skill"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +112,7 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	}
 	for _, path := range []string{
 		filepath.Join(codexHome, "config.toml"),
+		filepath.Join(codexHome, "auth.json"),
 		filepath.Join(codexHome, "skills", "acpa-global-global-skill", "SKILL.md"),
 		filepath.Join(codexHome, "skills", "acpa-assistant-assistant-skill", "SKILL.md"),
 	} {
@@ -113,6 +122,16 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	}
 	if !strings.Contains(overlay.PromptPrefix, "global instructions") || !strings.Contains(overlay.PromptPrefix, "assistant instructions") {
 		t.Fatalf("expected combined instructions in prompt prefix, got %q", overlay.PromptPrefix)
+	}
+	stateFile := filepath.Join(codexHome, "state_5.sqlite")
+	if err := os.WriteFile(stateFile, []byte("keep state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.PrepareOverlay(cfg, globalHome); err != nil {
+		t.Fatalf("prepare codex overlay again: %v", err)
+	}
+	if content, err := os.ReadFile(stateFile); err != nil || string(content) != "keep state" {
+		t.Fatalf("codex overlay generation should preserve existing state, content=%q err=%v", string(content), err)
 	}
 
 	cfg.Harness.Provider = model.ProviderClaude
