@@ -105,8 +105,12 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 		return nil
 	}
 	if isCommandText(msg.Text) {
-		if err := r.handleCommand(ctx, msg); err != nil {
+		reply, err := r.handleCommand(ctx, msg)
+		if err != nil {
 			return r.sendCommandError(ctx, msg, err)
+		}
+		if strings.TrimSpace(reply) != "" {
+			return r.sendCommandReply(ctx, msg, reply)
 		}
 		return nil
 	}
@@ -153,8 +157,12 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 }
 
 func (r *Runtime) sendCommandError(ctx context.Context, msg model.InboundMessage, commandErr error) error {
+	return r.sendCommandReply(ctx, msg, commandErr.Error())
+}
+
+func (r *Runtime) sendCommandReply(ctx context.Context, msg model.InboundMessage, text string) error {
 	if r.cfg.Sender == nil {
-		return commandErr
+		return nil
 	}
 	return r.cfg.Sender.Send(ctx, model.OutboundMessage{
 		AssistantID:      msg.AssistantID,
@@ -162,7 +170,7 @@ func (r *Runtime) sendCommandError(ctx context.Context, msg model.InboundMessage
 		AccountID:        msg.AccountID,
 		PrivateChannelID: msg.PrivateChannelID,
 		PlatformUserID:   msg.PlatformUserID,
-		Text:             commandErr.Error(),
+		Text:             text,
 		CreatedAt:        time.Now().UTC(),
 	})
 }
@@ -291,10 +299,10 @@ func (r *Runtime) ensureActiveSession(ctx context.Context, key model.SessionBind
 	return r.cfg.Store.CreateSession(ctx, key, mode, string(mode))
 }
 
-func (r *Runtime) handleCommand(ctx context.Context, msg model.InboundMessage) error {
+func (r *Runtime) handleCommand(ctx context.Context, msg model.InboundMessage) (string, error) {
 	fields := strings.Fields(strings.TrimSpace(msg.Text))
 	if len(fields) == 0 {
-		return nil
+		return "", nil
 	}
 	command := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
 	switch command {
@@ -306,25 +314,25 @@ func (r *Runtime) handleCommand(ctx context.Context, msg model.InboundMessage) e
 		return r.commandMode(ctx, msg.BindingKey(), fields[1:])
 	case "approve", "reject":
 		if len(fields) != 2 {
-			return fmt.Errorf("%s requires an approval id", command)
+			return "", fmt.Errorf("%s requires an approval id", command)
 		}
 		shortID := strings.ToUpper(fields[1])
 		permission, err := r.cfg.Store.PermissionByShortID(ctx, shortID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		option := permissionCommandOption(command, permission.Options)
 		if _, err := r.cfg.Store.ResolvePermission(ctx, shortID, msg.BindingKey(), option); err != nil {
-			return err
+			return "", err
 		}
 		if resolver, ok := r.cfg.Harness.(PermissionResolver); ok {
-			return resolver.ResolvePermission(ctx, shortID, option)
+			return "", resolver.ResolvePermission(ctx, shortID, option)
 		}
-		return nil
+		return "", nil
 	case "memory":
 		return r.commandMemory(ctx, msg, fields)
 	default:
-		return fmt.Errorf("unknown command %s", fields[0])
+		return "", fmt.Errorf("unknown command %s", fields[0])
 	}
 }
 
@@ -377,23 +385,26 @@ func preferredPermissionOption(options, preferred []string, fallback string) str
 	return options[0]
 }
 
-func (r *Runtime) commandNew(ctx context.Context, key model.SessionBindingKey) error {
+func (r *Runtime) commandNew(ctx context.Context, key model.SessionBindingKey) (string, error) {
 	mode, err := r.defaultMode(ctx, key)
 	if err != nil {
-		return err
+		return "", err
 	}
 	session, err := r.cfg.Store.CreateSession(ctx, key, mode, string(mode))
 	if err != nil {
-		return err
+		return "", err
 	}
-	return r.cfg.Store.SetActiveSession(ctx, key, session.ID)
+	if err := r.cfg.Store.SetActiveSession(ctx, key, session.ID); err != nil {
+		return "", err
+	}
+	return "New session " + session.ID + " created with mode " + string(mode), nil
 }
 
-func (r *Runtime) commandSession(ctx context.Context, key model.SessionBindingKey, args []string) error {
+func (r *Runtime) commandSession(ctx context.Context, key model.SessionBindingKey, args []string) (string, error) {
 	if len(args) == 0 {
 		sessions, err := r.cfg.Store.ListSessionsForBinding(ctx, key)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if r.cfg.Sender != nil {
 			var lines []string
@@ -402,82 +413,97 @@ func (r *Runtime) commandSession(ctx context.Context, key model.SessionBindingKe
 			}
 			_ = r.cfg.Sender.Send(ctx, model.OutboundMessage{AssistantID: key.AssistantID, Platform: key.Platform, AccountID: key.AccountID, PrivateChannelID: key.PrivateChannelID, PlatformUserID: key.PlatformUserID, Text: strings.Join(lines, "\n"), CreatedAt: time.Now().UTC()})
 		}
-		return nil
+		return "", nil
 	}
 	session, err := r.cfg.Store.SessionByID(ctx, args[0])
 	if err != nil {
-		return err
+		return "", err
 	}
 	if session.Binding != key {
-		return fmt.Errorf("session %s does not belong to sender", args[0])
+		return "", fmt.Errorf("session %s does not belong to sender", args[0])
 	}
-	return r.cfg.Store.SetActiveSession(ctx, key, session.ID)
+	if err := r.cfg.Store.SetActiveSession(ctx, key, session.ID); err != nil {
+		return "", err
+	}
+	return "Active session switched to " + session.ID + " (" + string(session.PermissionMode) + ")", nil
 }
 
-func (r *Runtime) commandMode(ctx context.Context, key model.SessionBindingKey, args []string) error {
+func (r *Runtime) commandMode(ctx context.Context, key model.SessionBindingKey, args []string) (string, error) {
 	if len(args) == 0 {
-		return fmt.Errorf("/mode requires a mode")
+		return "", fmt.Errorf("/mode requires a mode")
 	}
 	if args[0] == "default" {
 		if len(args) != 2 {
-			return fmt.Errorf("/mode default requires a mode")
+			return "", fmt.Errorf("/mode default requires a mode")
 		}
 		mode := model.PermissionMode(args[1])
 		policy := r.effectivePolicy(key)
 		if !policy.CanSetDefaultMode {
-			return fmt.Errorf("sender cannot set default mode")
+			return "", fmt.Errorf("sender cannot set default mode")
 		}
 		if err := r.validateMode(key, mode); err != nil {
-			return err
+			return "", err
 		}
-		return r.cfg.Store.SetBindingDefaultMode(ctx, key, mode)
+		if err := r.cfg.Store.SetBindingDefaultMode(ctx, key, mode); err != nil {
+			return "", err
+		}
+		return "Default mode set to " + string(mode), nil
 	}
 	mode := model.PermissionMode(args[0])
 	if err := r.validateMode(key, mode); err != nil {
-		return err
+		return "", err
 	}
 	session, err := r.ensureActiveSession(ctx, key)
 	if err != nil {
-		return err
+		return "", err
 	}
 	profile, err := harnesspkg.ResolveLaunchProfile(r.cfg.Provider, mode, harnesspkg.ProfileOptions{})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if r.cfg.Harness != nil {
 		result, err := r.cfg.Harness.SwitchMode(ctx, SwitchModeRequest{LocalSessionID: session.ID, CurrentACPSession: session.ACPSessionID, ExternalSessionID: session.ExternalSessionID, Mode: mode})
 		if err != nil {
-			return err
+			return "", err
 		}
 		if result.LaunchProfileKey != "" {
 			profile.Key = result.LaunchProfileKey
 		}
 		if result.ACPSessionID != "" {
 			if err := r.cfg.Store.UpdateSessionACP(ctx, session.ID, result.ACPSessionID, session.ExternalSessionID); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
-	return r.cfg.Store.UpdateSessionMode(ctx, session.ID, mode, profile.Key)
+	if err := r.cfg.Store.UpdateSessionMode(ctx, session.ID, mode, profile.Key); err != nil {
+		return "", err
+	}
+	return "Mode switched to " + string(mode), nil
 }
 
-func (r *Runtime) commandMemory(ctx context.Context, msg model.InboundMessage, fields []string) error {
+func (r *Runtime) commandMemory(ctx context.Context, msg model.InboundMessage, fields []string) (string, error) {
 	if r.cfg.Memory == nil {
-		return fmt.Errorf("memory manager is not configured")
+		return "", fmt.Errorf("memory manager is not configured")
 	}
 	if len(fields) >= 4 && fields[1] == "set" {
 		content := strings.TrimSpace(strings.TrimPrefix(msg.Text, strings.Join(fields[:3], " ")))
 		_, err := r.cfg.Memory.Update(ctx, model.MemoryUpdate{Target: fields[2], Content: content, Origin: model.MemoryOriginUser, ActorID: msg.PlatformUserID})
-		return err
+		if err != nil {
+			return "", err
+		}
+		return "Memory " + fields[2] + " updated", nil
 	}
 	if len(fields) == 4 && fields[1] == "rollback" {
 		var revision int64
 		if _, err := fmt.Sscanf(fields[3], "%d", &revision); err != nil {
-			return err
+			return "", err
 		}
-		return r.cfg.Memory.Rollback(ctx, fields[2], revision, msg.PlatformUserID)
+		if err := r.cfg.Memory.Rollback(ctx, fields[2], revision, msg.PlatformUserID); err != nil {
+			return "", err
+		}
+		return "Memory " + fields[2] + " rolled back to revision " + fields[3], nil
 	}
-	return fmt.Errorf("unsupported memory command")
+	return "", fmt.Errorf("unsupported memory command")
 }
 
 func (r *Runtime) defaultMode(ctx context.Context, key model.SessionBindingKey) (model.PermissionMode, error) {

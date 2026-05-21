@@ -249,6 +249,55 @@ func TestRuntimeReportsCommandErrorsToSender(t *testing.T) {
 	}
 }
 
+func TestRuntimeReportsModeSwitchSuccessToSender(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual, model.PermissionFullAuto, model.PermissionYolo}, DefaultMode: model.PermissionManual, CanSetDefaultMode: true},
+		},
+	})
+	msg := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "/mode yolo",
+	}
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("mode switch: %v", err)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Mode switched to yolo") {
+		t.Fatalf("expected mode switch confirmation, got %#v", s.messages)
+	}
+
+	defaultMsg := msg
+	defaultMsg.MessageID = "m2"
+	defaultMsg.Text = "/mode default full_auto"
+	if err := rt.HandleInbound(ctx, defaultMsg); err != nil {
+		t.Fatalf("default mode switch: %v", err)
+	}
+	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Default mode set to full_auto") {
+		t.Fatalf("expected default mode confirmation, got %#v", s.messages)
+	}
+}
+
 func TestRuntimeHandlesPermissionDecisionsFromCards(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
