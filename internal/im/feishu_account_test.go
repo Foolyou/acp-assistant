@@ -2,13 +2,17 @@ package im
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Foolyou/acp-assistant/internal/model"
+	"github.com/gorilla/websocket"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
 func TestFeishuAccountStartUsesSDKLongConnectionWithoutWebsocketURL(t *testing.T) {
@@ -138,7 +142,7 @@ func TestFeishuCardActionAcknowledgesBeforePermissionDecisionCompletes(t *testin
 			return errors.New("late resolution failure")
 		},
 	})
-	err := account.handleFeishuCardAction(context.Background(), &channeltypes.CardActionEvent{
+	resp, err := account.handleFeishuCardAction(context.Background(), &channeltypes.CardActionEvent{
 		EventID:   "card-event-1",
 		MessageID: "om_card",
 		ChatID:    "oc_private",
@@ -151,7 +155,47 @@ func TestFeishuCardActionAcknowledgesBeforePermissionDecisionCompletes(t *testin
 	if err != nil {
 		t.Fatalf("card action should be acknowledged immediately, got %v", err)
 	}
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("card action should return an updated card response, got %#v", resp)
+	}
 	close(block)
+}
+
+func TestFeishuCardActionReturnsUpdatedStatusCard(t *testing.T) {
+	account := NewFeishuAccount(AccountConfig{
+		AssistantID: "assistant-1",
+		Channel: model.ChannelConfig{
+			Platform:  model.PlatformFeishu,
+			AccountID: "main",
+		},
+		OnPermissionDecision: func(ctx context.Context, decision model.PermissionDecision) error {
+			return nil
+		},
+	})
+	resp, err := account.handleFeishuCardAction(context.Background(), &channeltypes.CardActionEvent{
+		EventID:   "card-event-1",
+		MessageID: "om_card",
+		ChatID:    "oc_private",
+		Operator:  channeltypes.CardActionOperator{OpenID: "ou_user"},
+		Action: channeltypes.CardActionPayload{Value: map[string]interface{}{
+			"short_approval_id": "ABC123",
+			"option":            "approve",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("card action: %v", err)
+	}
+	if resp == nil || resp.Card == nil || resp.Card.Type != "raw" {
+		t.Fatalf("expected raw card update response, got %#v", resp)
+	}
+	cardData, err := json.Marshal(resp.Card.Data)
+	if err != nil {
+		t.Fatalf("marshal response card: %v", err)
+	}
+	card := string(cardData)
+	if !strings.Contains(card, "已授权") || strings.Contains(card, `"tag":"button"`) {
+		t.Fatalf("expected approved status card without buttons, got %s", card)
+	}
 }
 
 func TestFeishuAccountSendsPermissionPromptCardWithTextFallback(t *testing.T) {
@@ -229,14 +273,91 @@ func TestFeishuAccountSendsPermissionPromptCardWithTextFallback(t *testing.T) {
 	}
 }
 
-func TestFeishuWSClientInstallsEventDispatcher(t *testing.T) {
-	wsClient := newFeishuWSClient(feishuLongConnectionConfig{
+func TestFeishuLongConnectionHandlesCardFrames(t *testing.T) {
+	conn := newFeishuSDKLongConnection(feishuLongConnectionConfig{
 		AppID:     "cli_test",
 		AppSecret: "secret_test",
-		Domain:    "feishu",
-	}, "https://open.feishu.cn")
-	if wsClient.EventHandler() == nil {
-		t.Fatal("expected Feishu WebSocket client to have an event dispatcher")
+	})
+	done := make(chan *channeltypes.CardActionEvent, 1)
+	var written []byte
+	conn.writeMessageHook = func(messageType int, data []byte) error {
+		if messageType != websocket.BinaryMessage {
+			t.Fatalf("expected binary ACK frame, got %d", messageType)
+		}
+		written = append([]byte(nil), data...)
+		return nil
+	}
+	conn.OnCardAction(func(ctx context.Context, event *channeltypes.CardActionEvent) (*callback.CardActionTriggerResponse, error) {
+		done <- event
+		return &callback.CardActionTriggerResponse{
+			Card: &callback.Card{
+				Type: "raw",
+				Data: map[string]any{
+					"elements": []any{map[string]any{"tag": "div", "text": map[string]string{"content": "已授权"}}},
+				},
+			},
+		}, nil
+	})
+	headers := larkws.Headers{}
+	headers.Add(larkws.HeaderType, string(larkws.MessageTypeCard))
+	headers.Add(larkws.HeaderMessageID, "msg-card-1")
+	headers.Add(larkws.HeaderSum, "1")
+	headers.Add(larkws.HeaderSeq, "0")
+	conn.handleDataFrame(context.Background(), larkws.Frame{
+		Method:  int32(larkws.FrameTypeData),
+		Headers: headers,
+		Payload: []byte(`{
+			"schema": "2.0",
+			"header": {
+				"event_id": "evt_card_1",
+				"event_type": "card.action.trigger",
+				"create_time": "1700000000000"
+			},
+			"event": {
+				"operator": {"open_id": "ou_user"},
+				"context": {
+					"open_message_id": "om_card",
+					"open_chat_id": "oc_private"
+				},
+				"action": {
+					"tag": "button",
+					"name": "approve",
+					"value": {
+						"short_approval_id": "ABC123",
+						"option": "approve"
+					}
+				}
+			}
+		}`),
+	})
+	select {
+	case event := <-done:
+		if event.EventID != "evt_card_1" || event.MessageID != "om_card" || event.ChatID != "oc_private" {
+			t.Fatalf("unexpected card action event: %#v", event)
+		}
+		if event.Operator.OpenID != "ou_user" || event.Action.Value["short_approval_id"] != "ABC123" || event.Action.Value["option"] != "approve" {
+			t.Fatalf("unexpected card action payload: %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected card action frame to reach handler")
+	}
+	var ackFrame larkws.Frame
+	if err := ackFrame.Unmarshal(written); err != nil {
+		t.Fatalf("unmarshal ACK frame: %v", err)
+	}
+	var ack larkws.Response
+	if err := json.Unmarshal(ackFrame.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal ACK payload: %v", err)
+	}
+	if ack.StatusCode != 200 {
+		t.Fatalf("expected ACK status 200, got %#v", ack)
+	}
+	var callbackResp callback.CardActionTriggerResponse
+	if err := json.Unmarshal(ack.Data, &callbackResp); err != nil {
+		t.Fatalf("unmarshal callback response: %v", err)
+	}
+	if callbackResp.Card == nil || callbackResp.Card.Type != "raw" {
+		t.Fatalf("expected card update in ACK, got %#v", callbackResp)
 	}
 }
 
@@ -264,7 +385,7 @@ type fakeFeishuLongConnection struct {
 	sent           []*channeltypes.SendInput
 	failSend       bool
 	onMessage      func(context.Context, *channeltypes.NormalizedMessage) error
-	onCardAction   func(context.Context, *channeltypes.CardActionEvent) error
+	onCardAction   func(context.Context, *channeltypes.CardActionEvent) (*callback.CardActionTriggerResponse, error)
 	onReady        func()
 	onReject       func(context.Context, *channeltypes.RejectEvent) error
 	onError        func(error)
@@ -296,7 +417,7 @@ func (f *fakeFeishuLongConnection) OnMessage(handler func(context.Context, *chan
 	f.onMessage = handler
 }
 
-func (f *fakeFeishuLongConnection) OnCardAction(handler func(context.Context, *channeltypes.CardActionEvent) error) {
+func (f *fakeFeishuLongConnection) OnCardAction(handler func(context.Context, *channeltypes.CardActionEvent) (*callback.CardActionTriggerResponse, error)) {
 	f.onCardAction = handler
 }
 
@@ -345,7 +466,7 @@ func (f *fakeFeishuLongConnection) cardAction(t *testing.T, event *channeltypes.
 	if f.onCardAction == nil {
 		t.Fatal("card action handler was not registered")
 	}
-	if err := f.onCardAction(context.Background(), event); err != nil {
+	if _, err := f.onCardAction(context.Background(), event); err != nil {
 		t.Fatalf("card action handler: %v", err)
 	}
 }

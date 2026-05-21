@@ -17,11 +17,8 @@ import (
 	"github.com/Foolyou/acp-assistant/internal/model"
 	"github.com/gorilla/websocket"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
-	larkchannel "github.com/larksuite/oapi-sdk-go/v3/channel"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
-	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
-	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
-	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 )
 
 type Decision string
@@ -60,7 +57,7 @@ type feishuLongConnection interface {
 	Stop(context.Context) error
 	Send(context.Context, *channeltypes.SendInput) (*channeltypes.SendResult, error)
 	OnMessage(func(context.Context, *channeltypes.NormalizedMessage) error)
-	OnCardAction(func(context.Context, *channeltypes.CardActionEvent) error)
+	OnCardAction(func(context.Context, *channeltypes.CardActionEvent) (*callback.CardActionTriggerResponse, error))
 	OnReject(func(context.Context, *channeltypes.RejectEvent) error)
 	OnReady(func())
 	OnError(func(error))
@@ -78,33 +75,8 @@ type feishuLongConnectionConfig struct {
 	HTTPClient   *http.Client
 }
 
-var newFeishuWSClient = func(cfg feishuLongConnectionConfig, openBaseURL string) *larkws.Client {
-	dispatcher := larkdispatcher.NewEventDispatcher("", "")
-	return larkws.NewClient(
-		cfg.AppID,
-		cfg.AppSecret,
-		larkws.WithDomain(openBaseURL),
-		larkws.WithEventHandler(dispatcher),
-		larkws.WithAutoReconnect(true),
-		larkws.WithLogLevel(larkcore.LogLevelError),
-		larkws.WithLogger(noopLarkLogger{}),
-	)
-}
-
 var newFeishuLongConnection = func(cfg feishuLongConnectionConfig) (feishuLongConnection, error) {
-	openBaseURL := feishuOpenBaseURL(cfg.Domain, cfg.OpenBaseURL)
-	clientOptions := []lark.ClientOptionFunc{
-		lark.WithOpenBaseUrl(openBaseURL),
-		lark.WithOAuthBaseUrl(feishuOAuthBaseURL(cfg.Domain, cfg.OAuthBaseURL)),
-		lark.WithLogLevel(larkcore.LogLevelError),
-		lark.WithLogger(noopLarkLogger{}),
-	}
-	if cfg.HTTPClient != nil {
-		clientOptions = append(clientOptions, lark.WithHttpClient(cfg.HTTPClient))
-	}
-	client := lark.NewClient(cfg.AppID, cfg.AppSecret, clientOptions...)
-	wsClient := newFeishuWSClient(cfg, openBaseURL)
-	return larkchannel.NewChannel(client, wsClient), nil
+	return newFeishuSDKLongConnection(cfg), nil
 }
 
 type BaseAccount struct {
@@ -387,6 +359,39 @@ func renderFeishuPermissionCard(prompt model.PermissionPrompt) string {
 	return string(data)
 }
 
+func renderFeishuPermissionStatusCard(shortApprovalID, option string) map[string]any {
+	status := "已处理"
+	if option == "approve" {
+		status = "已授权"
+	} else if option == "reject" {
+		status = "已拒绝"
+	}
+	return map[string]any{
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": map[string]any{
+			"title": map[string]string{"tag": "plain_text", "content": "Agent action approval"},
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "div",
+				"text": map[string]string{
+					"tag":     "lark_md",
+					"content": "**" + status + "**\nApproval ID: " + shortApprovalID,
+				},
+			},
+			map[string]any{
+				"tag": "hr",
+			},
+			map[string]any{
+				"tag": "note",
+				"elements": []any{
+					map[string]string{"tag": "plain_text", "content": status},
+				},
+			},
+		},
+	}
+}
+
 func (a *FeishuAccount) handleFeishuSDKMessage(ctx context.Context, sdkMsg *channeltypes.NormalizedMessage) error {
 	if sdkMsg == nil {
 		return nil
@@ -418,9 +423,9 @@ func (a *FeishuAccount) handleFeishuSDKMessage(ctx context.Context, sdkMsg *chan
 	return nil
 }
 
-func (a *FeishuAccount) handleFeishuCardAction(ctx context.Context, event *channeltypes.CardActionEvent) error {
+func (a *FeishuAccount) handleFeishuCardAction(ctx context.Context, event *channeltypes.CardActionEvent) (*callback.CardActionTriggerResponse, error) {
 	if event == nil {
-		return nil
+		return nil, nil
 	}
 	userID := event.Operator.OpenID
 	if userID == "" {
@@ -434,6 +439,7 @@ func (a *FeishuAccount) handleFeishuCardAction(ctx context.Context, event *chann
 	if option == "" {
 		option = event.Action.Name
 	}
+	shortApprovalID := stringMapValue(event.Action.Value, "short_approval_id")
 	decision := model.PermissionDecision{
 		AssistantID:      a.cfg.AssistantID,
 		Platform:         model.PlatformFeishu,
@@ -442,18 +448,43 @@ func (a *FeishuAccount) handleFeishuCardAction(ctx context.Context, event *chann
 		PlatformUserID:   userID,
 		EventID:          event.EventID,
 		MessageID:        event.MessageID,
-		ShortApprovalID:  stringMapValue(event.Action.Value, "short_approval_id"),
+		ShortApprovalID:  shortApprovalID,
 		Option:           option,
 	}
 	if a.cfg.OnPermissionDecision == nil {
-		return nil
+		return feishuCardActionResponse(shortApprovalID, option), nil
 	}
 	go func() {
 		if err := a.cfg.OnPermissionDecision(context.Background(), decision); err != nil {
 			_ = a.setStatus(context.Background(), model.ConnectorStateConnected, "permission card action failed", err.Error())
 		}
 	}()
-	return nil
+	return feishuCardActionResponse(shortApprovalID, option), nil
+}
+
+func feishuCardActionResponse(shortApprovalID, option string) *callback.CardActionTriggerResponse {
+	if shortApprovalID == "" {
+		return nil
+	}
+	status := "已处理"
+	toastType := "info"
+	if option == "approve" {
+		status = "已授权"
+		toastType = "success"
+	} else if option == "reject" {
+		status = "已拒绝"
+		toastType = "warning"
+	}
+	return &callback.CardActionTriggerResponse{
+		Toast: &callback.Toast{
+			Type:    toastType,
+			Content: status,
+		},
+		Card: &callback.Card{
+			Type: "raw",
+			Data: renderFeishuPermissionStatusCard(shortApprovalID, option),
+		},
+	}
 }
 
 type QQBotAccount struct {
