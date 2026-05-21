@@ -605,7 +605,7 @@ func ReadTextFileConfined(ctx context.Context, workspaceRoot, requested string, 
 
 func initializeParams() map[string]any {
 	return map[string]any{
-		"protocolVersion": "0.4.0",
+		"protocolVersion": 1,
 		"clientInfo": map[string]any{
 			"name":    "acp-assistant",
 			"version": "0.1.0",
