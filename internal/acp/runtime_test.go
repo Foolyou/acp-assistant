@@ -84,6 +84,29 @@ func TestRuntimeStartMergesConfiguredEnvironment(t *testing.T) {
 	defer rt.Stop()
 }
 
+func TestRuntimeStartUsesWorkspaceAsProcessDirectory(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	workspace := t.TempDir()
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "cwd_check")
+	t.Setenv("ACPA_EXPECTED_CWD", workspace)
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeStartUsesWorkspaceAsProcessDirectory")
+	rt := acp.NewRuntime(acp.Config{
+		Command:   cmd.Path,
+		Args:      cmd.Args[1:],
+		Workspace: workspace,
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+}
+
 func TestRuntimeLoadSessionIncludesMCPServers(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()
@@ -245,6 +268,18 @@ func runACPHelperProcess() {
 		}
 		switch req.Method {
 		case "initialize":
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "cwd_check" {
+				cwd, _ := os.Getwd()
+				expected := os.Getenv("ACPA_EXPECTED_CWD")
+				if cwd != expected {
+					_ = encoder.Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"error":   map[string]any{"code": -32603, "message": "unexpected cwd: " + cwd},
+					})
+					continue
+				}
+			}
 			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "env_check" && os.Getenv("ACPA_RUNTIME_CUSTOM_ENV") != "from-runtime" {
 				_ = encoder.Encode(map[string]any{
 					"jsonrpc": "2.0",

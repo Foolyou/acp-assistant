@@ -108,6 +108,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 	r.mu.Unlock()
 	cmd := exec.CommandContext(ctx, r.cfg.Command, r.cfg.Args...)
+	if strings.TrimSpace(r.cfg.Workspace) != "" {
+		cmd.Dir = r.cfg.Workspace
+	}
 	if len(r.cfg.Env) > 0 {
 		cmd.Env = os.Environ()
 		for key, value := range r.cfg.Env {
