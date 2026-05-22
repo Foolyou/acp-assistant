@@ -61,6 +61,38 @@ const (
 	EventMemory          EventType = "memory"
 	EventError           EventType = "error"
 	EventInboundDecision EventType = "inbound_decision"
+	EventCron            EventType = "cron"
+)
+
+type CronScheduleType string
+
+const (
+	CronScheduleTypeAt    CronScheduleType = "at"
+	CronScheduleTypeEvery CronScheduleType = "every"
+	CronScheduleTypeCron  CronScheduleType = "cron"
+)
+
+type CronTarget string
+
+const (
+	CronTargetIsolated CronTarget = "isolated"
+	CronTargetMain     CronTarget = "main"
+)
+
+type CronDeliveryMode string
+
+const (
+	CronDeliveryOrigin CronDeliveryMode = "origin"
+	CronDeliveryNone   CronDeliveryMode = "none"
+)
+
+type CronRunStatus string
+
+const (
+	CronRunStatusRunning   CronRunStatus = "running"
+	CronRunStatusSucceeded CronRunStatus = "succeeded"
+	CronRunStatusFailed    CronRunStatus = "failed"
+	CronRunStatusTimedOut  CronRunStatus = "timed_out"
 )
 
 type HarnessBinding struct {
@@ -246,6 +278,44 @@ type StatusSnapshot struct {
 	PendingPermissions int               `json:"pending_permissions"`
 	RecentErrors       []Event           `json:"recent_errors"`
 	MemoryRevisions    []MemoryRevision  `json:"memory_revisions"`
+}
+
+type CronJob struct {
+	ID             string            `json:"id"`
+	AssistantID    string            `json:"assistant_id"`
+	Name           string            `json:"name"`
+	Enabled        bool              `json:"enabled"`
+	ScheduleType   CronScheduleType  `json:"schedule_type"`
+	ScheduleExpr   string            `json:"schedule_expr"`
+	Timezone       string            `json:"timezone"`
+	Prompt         string            `json:"prompt"`
+	Target         CronTarget        `json:"target"`
+	DeliveryMode   CronDeliveryMode  `json:"delivery_mode"`
+	Creator        SessionBindingKey `json:"creator"`
+	PermissionMode PermissionMode    `json:"permission_mode"`
+	MaxConcurrency int               `json:"max_concurrency"`
+	NextRunAt      time.Time         `json:"next_run_at,omitempty"`
+	LastRunAt      time.Time         `json:"last_run_at,omitempty"`
+	Running        bool              `json:"running"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+type CronRun struct {
+	ID                string        `json:"id"`
+	JobID             string        `json:"job_id"`
+	AssistantID       string        `json:"assistant_id"`
+	Status            CronRunStatus `json:"status"`
+	Manual            bool          `json:"manual"`
+	DueAt             time.Time     `json:"due_at"`
+	StartedAt         time.Time     `json:"started_at"`
+	FinishedAt        time.Time     `json:"finished_at,omitempty"`
+	LocalSessionID    string        `json:"local_session_id,omitempty"`
+	ACPSessionID      string        `json:"acp_session_id,omitempty"`
+	ExternalSessionID string        `json:"external_session_id,omitempty"`
+	FinalText         string        `json:"final_text,omitempty"`
+	Error             string        `json:"error,omitempty"`
+	Job               CronJob       `json:"job,omitempty"`
 }
 
 type SkillInfo struct {

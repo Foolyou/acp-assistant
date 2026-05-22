@@ -412,6 +412,257 @@ func (s *Store) ExpirePermissions(ctx context.Context, now time.Time) ([]model.P
 	return expired, nil
 }
 
+func (s *Store) CreateCronJob(ctx context.Context, job model.CronJob) (model.CronJob, error) {
+	now := time.Now().UTC()
+	if job.ID == "" {
+		job.ID = randomID("cron")
+	}
+	if job.Timezone == "" {
+		job.Timezone = "UTC"
+	}
+	if job.Target == "" {
+		job.Target = model.CronTargetIsolated
+	}
+	if job.DeliveryMode == "" {
+		job.DeliveryMode = model.CronDeliveryOrigin
+	}
+	if job.PermissionMode == "" {
+		job.PermissionMode = model.PermissionManual
+	}
+	if job.MaxConcurrency <= 0 {
+		job.MaxConcurrency = 1
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = now
+	}
+	if job.UpdatedAt.IsZero() {
+		job.UpdatedAt = now
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO cron_jobs(
+		id, assistant_id, name, enabled, schedule_type, schedule_expr, timezone, prompt, target, delivery_mode,
+		creator_platform, creator_account_id, creator_private_channel_id, creator_platform_user_id, creator_conversation_key, creator_thread_key,
+		permission_mode, max_concurrency, next_run_at, last_run_at, running, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.AssistantID, job.Name, boolInt(job.Enabled), string(job.ScheduleType), job.ScheduleExpr, job.Timezone, job.Prompt, string(job.Target), string(job.DeliveryMode),
+		string(job.Creator.Platform), job.Creator.AccountID, job.Creator.PrivateChannelID, job.Creator.PlatformUserID, job.Creator.ConversationKey, job.Creator.ThreadKey,
+		string(job.PermissionMode), job.MaxConcurrency, encodeOptionalTime(job.NextRunAt), encodeOptionalTime(job.LastRunAt), boolInt(job.Running), encodeTime(job.CreatedAt), encodeTime(job.UpdatedAt))
+	if err != nil {
+		return model.CronJob{}, err
+	}
+	_ = s.RecordEvent(ctx, model.Event{AssistantID: job.AssistantID, Type: model.EventCron, Scope: job.ID, Message: "created", At: now})
+	return job, nil
+}
+
+func (s *Store) CronJob(ctx context.Context, assistantID, id string) (model.CronJob, error) {
+	row := s.db.QueryRowContext(ctx, cronJobSelect()+` WHERE assistant_id = ? AND id = ?`, assistantID, id)
+	return scanCronJob(row)
+}
+
+func (s *Store) ListCronJobs(ctx context.Context, assistantID string) ([]model.CronJob, error) {
+	rows, err := s.db.QueryContext(ctx, cronJobSelect()+` WHERE assistant_id = ? ORDER BY created_at DESC, id DESC`, assistantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.CronJob
+	for rows.Next() {
+		job, err := scanCronJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetCronJobEnabled(ctx context.Context, assistantID, id string, enabled bool, nextRunAt time.Time) (model.CronJob, error) {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE cron_jobs SET enabled = ?, next_run_at = ?, updated_at = ? WHERE assistant_id = ? AND id = ?`,
+		boolInt(enabled), encodeOptionalTime(nextRunAt), encodeTime(now), assistantID, id)
+	if err != nil {
+		return model.CronJob{}, err
+	}
+	return s.CronJob(ctx, assistantID, id)
+}
+
+func (s *Store) RemoveCronJob(ctx context.Context, assistantID, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM cron_jobs WHERE assistant_id = ? AND id = ?`, assistantID, id)
+	return err
+}
+
+func (s *Store) ClaimDueCronRuns(ctx context.Context, assistantID string, now time.Time, limit int) ([]model.CronRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	now = now.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, cronJobSelect()+` WHERE assistant_id = ? AND enabled = 1 AND running = 0 AND next_run_at != '' AND next_run_at <= ? ORDER BY next_run_at ASC, id ASC LIMIT ?`, assistantID, encodeTime(now), limit)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	var jobs []model.CronJob
+	for rows.Next() {
+		job, err := scanCronJob(rows)
+		if err != nil {
+			_ = rows.Close()
+			_ = tx.Rollback()
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Close(); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	claims := make([]model.CronRun, 0, len(jobs))
+	for _, job := range jobs {
+		result, err := tx.ExecContext(ctx, `UPDATE cron_jobs SET running = 1, last_run_at = ?, updated_at = ? WHERE assistant_id = ? AND id = ? AND running = 0`,
+			encodeTime(now), encodeTime(now), assistantID, job.ID)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		affected, _ := result.RowsAffected()
+		if affected != 1 {
+			continue
+		}
+		run := model.CronRun{
+			ID:          randomID("crun"),
+			JobID:       job.ID,
+			AssistantID: assistantID,
+			Status:      model.CronRunStatusRunning,
+			DueAt:       job.NextRunAt,
+			StartedAt:   now,
+			Job:         job,
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO cron_runs(id, job_id, assistant_id, status, manual, due_at, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			run.ID, run.JobID, run.AssistantID, string(run.Status), boolInt(run.Manual), encodeTime(run.DueAt), encodeTime(run.StartedAt)); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		claims = append(claims, run)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+func (s *Store) CreateManualCronRun(ctx context.Context, assistantID, jobID string, now time.Time) (model.CronRun, error) {
+	job, err := s.CronJob(ctx, assistantID, jobID)
+	if err != nil {
+		return model.CronRun{}, err
+	}
+	now = now.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.CronRun{}, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE cron_jobs SET running = 1, last_run_at = ?, updated_at = ? WHERE assistant_id = ? AND id = ? AND running = 0`,
+		encodeTime(now), encodeTime(now), assistantID, job.ID)
+	if err != nil {
+		_ = tx.Rollback()
+		return model.CronRun{}, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		_ = tx.Rollback()
+		return model.CronRun{}, fmt.Errorf("cron job %s is already running", job.ID)
+	}
+	run := model.CronRun{
+		ID:          randomID("crun"),
+		JobID:       job.ID,
+		AssistantID: assistantID,
+		Status:      model.CronRunStatusRunning,
+		Manual:      true,
+		DueAt:       now,
+		StartedAt:   now,
+		Job:         job,
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO cron_runs(id, job_id, assistant_id, status, manual, due_at, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.JobID, run.AssistantID, string(run.Status), boolInt(run.Manual), encodeTime(run.DueAt), encodeTime(run.StartedAt))
+	if err != nil {
+		_ = tx.Rollback()
+		return model.CronRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.CronRun{}, err
+	}
+	return run, nil
+}
+
+func (s *Store) CompleteCronRun(ctx context.Context, runID string, status model.CronRunStatus, finalText, errorText, localSessionID, acpSessionID, externalSessionID string, nextRunAt *time.Time) (model.CronRun, error) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.CronRun{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE cron_runs SET status = ?, finished_at = ?, local_session_id = ?, acp_session_id = ?, external_session_id = ?, final_text = ?, error = ? WHERE id = ?`,
+		string(status), encodeTime(now), localSessionID, acpSessionID, externalSessionID, finalText, errorText, runID); err != nil {
+		_ = tx.Rollback()
+		return model.CronRun{}, err
+	}
+	var jobID, assistantID string
+	if err := tx.QueryRowContext(ctx, `SELECT job_id, assistant_id FROM cron_runs WHERE id = ?`, runID).Scan(&jobID, &assistantID); err != nil {
+		_ = tx.Rollback()
+		return model.CronRun{}, err
+	}
+	enabled := 0
+	next := ""
+	if nextRunAt != nil && !nextRunAt.IsZero() {
+		enabled = 1
+		next = encodeTime(nextRunAt.UTC())
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE cron_jobs SET running = 0, enabled = ?, next_run_at = ?, updated_at = ? WHERE assistant_id = ? AND id = ?`,
+		enabled, next, encodeTime(now), assistantID, jobID); err != nil {
+		_ = tx.Rollback()
+		return model.CronRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.CronRun{}, err
+	}
+	return s.CronRun(ctx, runID)
+}
+
+func (s *Store) CronRun(ctx context.Context, runID string) (model.CronRun, error) {
+	row := s.db.QueryRowContext(ctx, cronRunSelect()+` WHERE r.id = ?`, runID)
+	return scanCronRun(row)
+}
+
+func (s *Store) RecentCronRuns(ctx context.Context, assistantID, jobID string, limit int) ([]model.CronRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, cronRunSelect()+` WHERE r.assistant_id = ? AND r.job_id = ? ORDER BY r.started_at DESC, r.id DESC LIMIT ?`, assistantID, jobID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.CronRun
+	for rows.Next() {
+		run, err := scanCronRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) RecordMemoryRevision(ctx context.Context, revision model.MemoryRevision) (model.MemoryRevision, error) {
 	if revision.ID == "" {
 		revision.ID = randomID("mem")
@@ -575,8 +826,72 @@ func scanMemoryRevision(row scanner) (model.MemoryRevision, error) {
 	return revision, nil
 }
 
+func cronJobSelect() string {
+	return `SELECT id, assistant_id, name, enabled, schedule_type, schedule_expr, timezone, prompt, target, delivery_mode,
+		creator_platform, creator_account_id, creator_private_channel_id, creator_platform_user_id, creator_conversation_key, creator_thread_key,
+		permission_mode, max_concurrency, next_run_at, last_run_at, running, created_at, updated_at FROM cron_jobs`
+}
+
+func scanCronJob(row scanner) (model.CronJob, error) {
+	var job model.CronJob
+	var enabled, running int
+	var scheduleType, target, deliveryMode, platform, mode, nextRun, lastRun, created, updated string
+	if err := row.Scan(&job.ID, &job.AssistantID, &job.Name, &enabled, &scheduleType, &job.ScheduleExpr, &job.Timezone, &job.Prompt, &target, &deliveryMode,
+		&platform, &job.Creator.AccountID, &job.Creator.PrivateChannelID, &job.Creator.PlatformUserID, &job.Creator.ConversationKey, &job.Creator.ThreadKey,
+		&mode, &job.MaxConcurrency, &nextRun, &lastRun, &running, &created, &updated); err != nil {
+		return model.CronJob{}, err
+	}
+	job.Enabled = enabled != 0
+	job.Running = running != 0
+	job.ScheduleType = model.CronScheduleType(scheduleType)
+	job.Target = model.CronTarget(target)
+	job.DeliveryMode = model.CronDeliveryMode(deliveryMode)
+	job.Creator.AssistantID = job.AssistantID
+	job.Creator.Platform = model.Platform(platform)
+	job.PermissionMode = model.PermissionMode(mode)
+	job.NextRunAt = decodeTime(nextRun)
+	job.LastRunAt = decodeTime(lastRun)
+	job.CreatedAt = decodeTime(created)
+	job.UpdatedAt = decodeTime(updated)
+	return job, nil
+}
+
+func cronRunSelect() string {
+	return `SELECT r.id, r.job_id, r.assistant_id, r.status, r.manual, r.due_at, r.started_at, r.finished_at,
+		r.local_session_id, r.acp_session_id, r.external_session_id, r.final_text, r.error FROM cron_runs r`
+}
+
+func scanCronRun(row scanner) (model.CronRun, error) {
+	var run model.CronRun
+	var status, due, started, finished string
+	var manual int
+	if err := row.Scan(&run.ID, &run.JobID, &run.AssistantID, &status, &manual, &due, &started, &finished, &run.LocalSessionID, &run.ACPSessionID, &run.ExternalSessionID, &run.FinalText, &run.Error); err != nil {
+		return model.CronRun{}, err
+	}
+	run.Status = model.CronRunStatus(status)
+	run.Manual = manual != 0
+	run.DueAt = decodeTime(due)
+	run.StartedAt = decodeTime(started)
+	run.FinishedAt = decodeTime(finished)
+	return run, nil
+}
+
 func encodeTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func encodeOptionalTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return encodeTime(t)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func decodeTime(s string) time.Time {

@@ -2,10 +2,12 @@ package assistant_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Foolyou/acp-assistant/internal/assistant"
 	"github.com/Foolyou/acp-assistant/internal/model"
@@ -15,14 +17,26 @@ import (
 type fakeHarness struct {
 	prompts             []assistant.PromptRequest
 	resolvedPermissions []string
+	finalText           string
+	ensureErr           error
+	promptErr           error
 }
 
 func (f *fakeHarness) EnsureSession(ctx context.Context, req assistant.EnsureSessionRequest) (assistant.EnsureSessionResult, error) {
+	if f.ensureErr != nil {
+		return assistant.EnsureSessionResult{}, f.ensureErr
+	}
 	return assistant.EnsureSessionResult{ACPSessionID: "acp-" + req.LocalSessionID, ExternalSessionID: "external-" + req.LocalSessionID}, nil
 }
 
 func (f *fakeHarness) Prompt(ctx context.Context, req assistant.PromptRequest) (assistant.PromptResult, error) {
 	f.prompts = append(f.prompts, req)
+	if f.promptErr != nil {
+		return assistant.PromptResult{}, f.promptErr
+	}
+	if f.finalText != "" {
+		return assistant.PromptResult{FinalText: f.finalText}, nil
+	}
 	return assistant.PromptResult{FinalText: "reply: " + req.Text}, nil
 }
 
@@ -399,6 +413,300 @@ func TestRuntimeHelpStatusAndClearCommands(t *testing.T) {
 	}
 	if len(s.messages) != 4 || !strings.Contains(s.messages[3].Text, "Cleared context. New session") {
 		t.Fatalf("clear should send explicit success, got %#v", s.messages)
+	}
+}
+
+func TestRuntimeCronCommandsRequireOwnerAndCreateJobs(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+		ChannelOptions: map[string]map[string]string{
+			"feishu/main": {"owner_open_id": "owner-a"},
+		},
+	})
+	user := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "/cron list",
+	}
+	if err := rt.HandleInbound(ctx, user); err != nil {
+		t.Fatalf("cron list denied should be reported to sender: %v", err)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Owner permission is required") {
+		t.Fatalf("cron list should require owner/admin, got %#v", s.messages)
+	}
+	owner := user
+	owner.PlatformUserID = "owner-a"
+	owner.MessageID = "m2"
+	owner.Text = "/cron add --every 1h --name hourly --message summarize workspace"
+	if err := rt.HandleInbound(ctx, owner); err != nil {
+		t.Fatalf("cron add: %v", err)
+	}
+	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Cron job created") || !strings.Contains(s.messages[1].Text, "hourly") {
+		t.Fatalf("cron add should confirm creation, got %#v", s.messages)
+	}
+	jobs, err := db.ListCronJobs(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("list cron jobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Prompt != "summarize workspace" || jobs[0].Creator.PlatformUserID != "owner-a" {
+		t.Fatalf("unexpected cron job: %#v", jobs)
+	}
+	owner.MessageID = "m3"
+	owner.Text = "/cron list"
+	if err := rt.HandleInbound(ctx, owner); err != nil {
+		t.Fatalf("cron list: %v", err)
+	}
+	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, jobs[0].ID) || !strings.Contains(s.messages[2].Text, "hourly") {
+		t.Fatalf("cron list should show created job, got %#v", s.messages)
+	}
+}
+
+func TestRuntimeExecutesCronRunAndDeliversResult(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+	now := time.Date(2026, 5, 23, 8, 0, 0, 0, time.UTC)
+	creator := model.SessionBindingKey{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "owner-a",
+	}
+	job, err := db.CreateCronJob(ctx, model.CronJob{
+		AssistantID:  "alpha",
+		Name:         "report",
+		Enabled:      true,
+		ScheduleType: model.CronScheduleTypeEvery,
+		ScheduleExpr: "1h",
+		Timezone:     "UTC",
+		Prompt:       "summarize workspace",
+		Target:       model.CronTargetIsolated,
+		DeliveryMode: model.CronDeliveryOrigin,
+		Creator:      creator,
+		NextRunAt:    now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	run, err := db.CreateManualCronRun(ctx, "alpha", job.ID, now)
+	if err != nil {
+		t.Fatalf("manual run: %v", err)
+	}
+	if err := rt.ExecuteCronRun(ctx, run); err != nil {
+		t.Fatalf("execute cron run: %v", err)
+	}
+	if len(h.prompts) != 1 || h.prompts[0].Text != "summarize workspace" {
+		t.Fatalf("cron prompt not dispatched: %#v", h.prompts)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "reply: summarize workspace") || s.messages[0].PlatformUserID != "owner-a" {
+		t.Fatalf("cron result should be delivered to origin, got %#v", s.messages)
+	}
+	completed, err := db.CronRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+	if completed.Status != model.CronRunStatusSucceeded || completed.FinalText != "reply: summarize workspace" || completed.LocalSessionID == "" {
+		t.Fatalf("run should be recorded as succeeded, got %#v", completed)
+	}
+	loaded, err := db.CronJob(ctx, "alpha", job.ID)
+	if err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if !loaded.Enabled || !loaded.NextRunAt.Equal(job.NextRunAt) {
+		t.Fatalf("manual run should preserve schedule, got %#v", loaded)
+	}
+}
+
+func TestRuntimeRunsDueCronJobsAndAdvancesSchedule(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+	due := time.Date(2026, 5, 23, 8, 0, 0, 0, time.UTC)
+	job, err := db.CreateCronJob(ctx, model.CronJob{
+		AssistantID:  "alpha",
+		Name:         "report",
+		Enabled:      true,
+		ScheduleType: model.CronScheduleTypeEvery,
+		ScheduleExpr: "30m",
+		Timezone:     "UTC",
+		Prompt:       "check status",
+		Target:       model.CronTargetIsolated,
+		DeliveryMode: model.CronDeliveryNone,
+		Creator: model.SessionBindingKey{
+			AssistantID:      "alpha",
+			Platform:         model.PlatformFeishu,
+			AccountID:        "main",
+			PrivateChannelID: "chat-a",
+			PlatformUserID:   "owner-a",
+		},
+		NextRunAt: due,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := rt.RunDueCronJobs(ctx, due, 10); err != nil {
+		t.Fatalf("run due jobs: %v", err)
+	}
+	if len(h.prompts) != 1 || h.prompts[0].Text != "check status" {
+		t.Fatalf("due job was not prompted: %#v", h.prompts)
+	}
+	loaded, err := db.CronJob(ctx, "alpha", job.ID)
+	if err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if !loaded.Enabled || loaded.Running || !loaded.NextRunAt.Equal(due.Add(30*time.Minute)) {
+		t.Fatalf("recurring job should advance and unlock, got %#v", loaded)
+	}
+}
+
+func TestRuntimeCronDeliverySuppressesSilentSuccessAndReportsFailure(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{finalText: "[SILENT] no changes"}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+	now := time.Date(2026, 5, 23, 8, 0, 0, 0, time.UTC)
+	creator := model.SessionBindingKey{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "owner-a",
+	}
+	job, err := db.CreateCronJob(ctx, model.CronJob{
+		AssistantID:  "alpha",
+		Name:         "silent",
+		Enabled:      true,
+		ScheduleType: model.CronScheduleTypeEvery,
+		ScheduleExpr: "1h",
+		Timezone:     "UTC",
+		Prompt:       "quiet check",
+		Target:       model.CronTargetIsolated,
+		DeliveryMode: model.CronDeliveryOrigin,
+		Creator:      creator,
+		NextRunAt:    now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create silent job: %v", err)
+	}
+	run, err := db.CreateManualCronRun(ctx, "alpha", job.ID, now)
+	if err != nil {
+		t.Fatalf("manual silent run: %v", err)
+	}
+	if err := rt.ExecuteCronRun(ctx, run); err != nil {
+		t.Fatalf("execute silent run: %v", err)
+	}
+	if len(s.messages) != 0 {
+		t.Fatalf("silent success should not deliver, got %#v", s.messages)
+	}
+
+	h.finalText = ""
+	h.promptErr = errors.New("boom")
+	failJob, err := db.CreateCronJob(ctx, model.CronJob{
+		AssistantID:  "alpha",
+		Name:         "failure",
+		Enabled:      true,
+		ScheduleType: model.CronScheduleTypeEvery,
+		ScheduleExpr: "1h",
+		Timezone:     "UTC",
+		Prompt:       "fail check",
+		Target:       model.CronTargetIsolated,
+		DeliveryMode: model.CronDeliveryOrigin,
+		Creator:      creator,
+		NextRunAt:    now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create failure job: %v", err)
+	}
+	failRun, err := db.CreateManualCronRun(ctx, "alpha", failJob.ID, now)
+	if err != nil {
+		t.Fatalf("manual failure run: %v", err)
+	}
+	if err := rt.ExecuteCronRun(ctx, failRun); err != nil {
+		t.Fatalf("execute failure run: %v", err)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Cron job failure failed: boom") {
+		t.Fatalf("failure should deliver error, got %#v", s.messages)
+	}
+	completed, err := db.CronRun(ctx, failRun.ID)
+	if err != nil {
+		t.Fatalf("load failed run: %v", err)
+	}
+	if completed.Status != model.CronRunStatusFailed || completed.Error != "boom" {
+		t.Fatalf("failure should be recorded, got %#v", completed)
 	}
 }
 

@@ -472,6 +472,8 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 	fmt.Fprintf(stdout, "assistant %s serving with %d connector account(s)\n", cfg.ID, len(accounts))
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	stopCron := rt.StartCronScheduler(sigCtx, time.Minute)
+	defer stopCron()
 	permissionTicker := time.NewTicker(30 * time.Second)
 	defer permissionTicker.Stop()
 	go func() {
