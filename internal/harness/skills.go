@@ -23,7 +23,7 @@ Return exactly one fenced JSON block using ` + "```acpa-cron" + ` and no user-fa
 
 Create:
 ` + "```acpa-cron" + `
-{"action":"create","name":"short name","schedule_type":"at","schedule_expr":"2099-01-02T15:04:05+08:00","timezone":"Asia/Shanghai","message":"self-contained prompt to run later","target":"isolated","delivery":"origin"}
+{"action":"create","name":"short name","schedule_type":"at","schedule_expr":"2099-01-02T15:04:05+08:00","timezone":"Asia/Shanghai","message":"exact reminder text or self-contained prompt","target":"direct","delivery":"origin"}
 ` + "```" + `
 
 Delete:
@@ -36,7 +36,7 @@ List:
 {"action":"list"}
 ` + "```" + `
 
-Use RFC3339 with an explicit offset for one-time reminders. Use Go durations such as 10m, 2h, or 24h for fixed intervals. Use five-field cron expressions for calendar schedules. Default timezone to Asia/Shanghai, target to isolated, and delivery to origin. Do not tell the user a reminder or schedule has been created unless you returned an acpa-cron block.`
+Use RFC3339 with an explicit offset for one-time reminders. Use Go durations such as 10m, 2h, or 24h for fixed intervals. Use five-field cron expressions for calendar schedules. Default timezone to Asia/Shanghai and delivery to origin. For simple reminders where the desired output is just the reminder text, set target to direct and set message to the exact text ACPA should send at the scheduled time. For scheduled assistant work that needs model reasoning, set target to isolated and make message a self-contained prompt. Do not tell the user a reminder or schedule has been created unless you returned an acpa-cron block.`
 
 var builtInSkills = []builtInSkill{
 	{

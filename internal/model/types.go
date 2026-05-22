@@ -77,6 +77,7 @@ type CronTarget string
 const (
 	CronTargetIsolated CronTarget = "isolated"
 	CronTargetMain     CronTarget = "main"
+	CronTargetDirect   CronTarget = "direct"
 )
 
 type CronDeliveryMode string

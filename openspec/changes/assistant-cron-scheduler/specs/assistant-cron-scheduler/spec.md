@@ -46,7 +46,11 @@ The system SHALL atomically claim due enabled jobs before execution so a job run
 - **THEN** the system does not claim another run for the same job
 
 ### Requirement: Scheduled execution
-The system SHALL execute claimed cron runs through the assistant's configured harness using either isolated or main session targeting.
+The system SHALL execute claimed cron runs according to their target: direct delivery, isolated harness session, or main harness session.
+
+#### Scenario: Direct execution
+- **WHEN** a due job targets `direct`
+- **THEN** the system records the stored prompt as the run final text without prompting the harness
 
 #### Scenario: Isolated execution
 - **WHEN** a due job targets `isolated`

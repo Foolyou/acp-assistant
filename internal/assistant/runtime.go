@@ -394,7 +394,7 @@ func (r *Runtime) executeHarnessCronTool(ctx context.Context, msg model.InboundM
 		if opts.Prompt == "" {
 			return "", fmt.Errorf("message is required")
 		}
-		if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain {
+		if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain && opts.Target != model.CronTargetDirect {
 			return "", fmt.Errorf("unsupported cron target %q", opts.Target)
 		}
 		if opts.DeliveryMode != model.CronDeliveryOrigin && opts.DeliveryMode != model.CronDeliveryNone {
@@ -472,7 +472,9 @@ func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {
 		}
 	}
 
-	if errorText == "" {
+	if errorText == "" && job.Target == model.CronTargetDirect {
+		finalText = job.Prompt
+	} else if errorText == "" {
 		session, err := r.ensureCronSession(ctx, job)
 		if err != nil {
 			status = model.CronRunStatusFailed
@@ -1055,7 +1057,7 @@ func parseCronOptions(args []string) (cronCommandOptions, error) {
 				return opts, fmt.Errorf("--target requires a value")
 			}
 			opts.Target = model.CronTarget(args[i])
-			if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain {
+			if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain && opts.Target != model.CronTargetDirect {
 				return opts, fmt.Errorf("unsupported cron target %q", args[i])
 			}
 		case "--deliver":
