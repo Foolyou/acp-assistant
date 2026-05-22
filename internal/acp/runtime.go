@@ -71,6 +71,7 @@ type Runtime struct {
 	stdin            io.WriteCloser
 	pending          map[string]chan rpcResponse
 	promptCollectors map[string]*promptCollector
+	promptPrefixSent map[string]bool
 	nextID           atomic.Int64
 	caps             Capabilities
 	mu               sync.Mutex
@@ -96,6 +97,7 @@ func NewRuntime(cfg Config) *Runtime {
 		cfg:              cfg,
 		pending:          map[string]chan rpcResponse{},
 		promptCollectors: map[string]*promptCollector{},
+		promptPrefixSent: map[string]bool{},
 	}
 }
 
@@ -289,7 +291,7 @@ func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) (string, e
 
 	var result map[string]any
 	prompt := []map[string]any{}
-	if strings.TrimSpace(r.cfg.PromptPrefix) != "" {
+	if r.shouldSendPromptPrefix(sessionID) {
 		prompt = append(prompt, map[string]any{"type": "text", "text": r.cfg.PromptPrefix})
 	}
 	prompt = append(prompt, map[string]any{"type": "text", "text": text})
@@ -300,6 +302,19 @@ func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) (string, e
 		return "", err
 	}
 	return collector.String(), nil
+}
+
+func (r *Runtime) shouldSendPromptPrefix(sessionID string) bool {
+	if strings.TrimSpace(r.cfg.PromptPrefix) == "" || sessionID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.promptPrefixSent[sessionID] {
+		return false
+	}
+	r.promptPrefixSent[sessionID] = true
+	return true
 }
 
 func (r *Runtime) Cancel(ctx context.Context, sessionID string) error {

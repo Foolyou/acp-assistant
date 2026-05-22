@@ -211,6 +211,9 @@ func TestRuntimePromptPrependsConfiguredPrefix(t *testing.T) {
 	if _, err := rt.Prompt(ctx, "session-1", "hello"); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
+	if _, err := rt.Prompt(ctx, "session-1", "again"); err != nil {
+		t.Fatalf("second prompt should not repeat prefix: %v", err)
+	}
 }
 
 func TestRuntimePromptReturnsAgentTextChunks(t *testing.T) {
@@ -310,6 +313,7 @@ func TestParseInitializeCapabilities(t *testing.T) {
 func runACPHelperProcess() {
 	decoder := json.NewDecoder(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
+	promptCount := 0
 	for {
 		var req struct {
 			ID     int             `json:"id"`
@@ -420,6 +424,7 @@ func runACPHelperProcess() {
 			})
 		case "session/prompt":
 			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix" {
+				promptCount++
 				var payload struct {
 					Prompt []struct {
 						Type string `json:"type"`
@@ -427,11 +432,19 @@ func runACPHelperProcess() {
 					} `json:"prompt"`
 				}
 				_ = json.Unmarshal(req.Params, &payload)
-				if len(payload.Prompt) != 2 || payload.Prompt[0].Text != "fixed instructions" || payload.Prompt[1].Text != "hello" {
+				if promptCount == 1 && (len(payload.Prompt) != 2 || payload.Prompt[0].Text != "fixed instructions" || payload.Prompt[1].Text != "hello") {
 					_ = encoder.Encode(map[string]any{
 						"jsonrpc": "2.0",
 						"id":      req.ID,
 						"error":   map[string]any{"code": -32602, "message": "missing prompt prefix"},
+					})
+					continue
+				}
+				if promptCount == 2 && (len(payload.Prompt) != 1 || payload.Prompt[0].Text != "again") {
+					_ = encoder.Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"error":   map[string]any{"code": -32602, "message": "prompt prefix repeated"},
 					})
 					continue
 				}

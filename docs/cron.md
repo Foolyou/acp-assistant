@@ -7,7 +7,7 @@ ACPA cron is an assistant-owned scheduler for reminders and recurring assistant 
 ACPA exposes cron through two surfaces:
 
 - Owner/admin IM commands for deterministic operations: `/cron add`, `/cron list`, `/cron pause`, `/cron resume`, `/cron remove`, `/cron run`, and `/cron runs`.
-- A built-in harness skill named `acpa-cron`, injected into Codex and Claude overlays. The same cron protocol is also injected into every harness prompt prefix so active harnesses cannot miss it. The protocol tells the harness to return a fenced `acpa-cron` JSON block for `create`, `delete`, and `list` operations. The assistant runtime executes the block and sends the confirmation or error to the user.
+- A built-in harness skill named `acpa-cron`, injected into Codex and Claude overlays. The same cron protocol is also included in the first prompt sent to each ACP session so active harnesses can see it without repeating it through the whole session history. The protocol tells the harness to return a fenced `acpa-cron` JSON block for `create`, `delete`, and `list` operations. The assistant runtime executes the block and sends the confirmation or error to the user.
 
 The runtime does not parse arbitrary natural-language reminders itself. Natural-language understanding belongs to the harness; the host only validates and executes the structured cron tool call.
 

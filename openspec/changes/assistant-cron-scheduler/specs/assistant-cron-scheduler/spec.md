@@ -23,7 +23,7 @@ The system SHALL restrict `/cron` management commands to owner/admin users.
 - **THEN** the system rejects the command without creating a job
 
 ### Requirement: Harness cron skill
-The system SHALL inject a built-in cron skill into managed harness overlays, include the cron tool protocol in the harness prompt prefix, and execute structured cron tool calls returned by the harness for owner/admin users.
+The system SHALL inject a built-in cron skill into managed harness overlays, include the cron tool protocol only once per ACP session through the harness prompt prefix, and execute structured cron tool calls returned by the harness for owner/admin users.
 
 #### Scenario: Harness creates cron job
 - **WHEN** an owner asks for a reminder in natural language
