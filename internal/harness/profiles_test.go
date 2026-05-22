@@ -139,6 +139,9 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	if !strings.Contains(overlay.PromptPrefix, "global instructions") || !strings.Contains(overlay.PromptPrefix, "assistant instructions") {
 		t.Fatalf("expected combined instructions in prompt prefix, got %q", overlay.PromptPrefix)
 	}
+	if !strings.Contains(overlay.PromptPrefix, "```acpa-cron") || !strings.Contains(overlay.PromptPrefix, "Do not tell the user a reminder or schedule has been created") {
+		t.Fatalf("expected built-in cron protocol in prompt prefix, got %q", overlay.PromptPrefix)
+	}
 	stateFile := filepath.Join(codexHome, "state_5.sqlite")
 	if err := os.WriteFile(stateFile, []byte("keep state"), 0o600); err != nil {
 		t.Fatal(err)

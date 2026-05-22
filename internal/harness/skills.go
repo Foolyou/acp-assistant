@@ -15,6 +15,29 @@ type builtInSkill struct {
 	Content     string
 }
 
+const builtInCronProtocol = `ACPA built-in cron protocol:
+
+When the user asks to create a reminder, schedule one-time work, schedule recurring work, delete a scheduled job, or list scheduled jobs, you MUST use the host cron protocol instead of merely saying it is done.
+
+Return exactly one fenced JSON block using ` + "```acpa-cron" + ` and no user-facing prose. ACPA will execute the block, then ACPA will send the confirmation or error.
+
+Create:
+` + "```acpa-cron" + `
+{"action":"create","name":"short name","schedule_type":"at","schedule_expr":"2099-01-02T15:04:05+08:00","timezone":"Asia/Shanghai","message":"self-contained prompt to run later","target":"isolated","delivery":"origin"}
+` + "```" + `
+
+Delete:
+` + "```acpa-cron" + `
+{"action":"delete","job_id":"cron_xxx"}
+` + "```" + `
+
+List:
+` + "```acpa-cron" + `
+{"action":"list"}
+` + "```" + `
+
+Use RFC3339 with an explicit offset for one-time reminders. Use Go durations such as 10m, 2h, or 24h for fixed intervals. Use five-field cron expressions for calendar schedules. Default timezone to Asia/Shanghai, target to isolated, and delivery to origin. Do not tell the user a reminder or schedule has been created unless you returned an acpa-cron block.`
+
 var builtInSkills = []builtInSkill{
 	{
 		OverlayName: "acpa-built-in-cron",
@@ -23,28 +46,7 @@ var builtInSkills = []builtInSkill{
 			"description: Create, delete, and list ACPA scheduled reminders and recurring assistant work.\n" +
 			"---\n\n" +
 			"# ACPA Cron\n\n" +
-			"Use this skill when the user asks to create a reminder, schedule one-time work, schedule recurring assistant work, delete a scheduled job, or list scheduled jobs.\n\n" +
-			"ACPA executes cron management only when your final response contains one fenced block whose opening line is exactly three backticks followed by `acpa-cron`. Put only JSON inside the block and no user-facing prose outside it.\n\n" +
-			"Create schema:\n\n" +
-			"```acpa-cron\n" +
-			"{\"action\":\"create\",\"name\":\"short name\",\"schedule_type\":\"at\",\"schedule_expr\":\"2099-01-02T15:04:05+08:00\",\"timezone\":\"Asia/Shanghai\",\"message\":\"self-contained prompt to run later\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n" +
-			"```\n\n" +
-			"Delete schema:\n\n" +
-			"```acpa-cron\n" +
-			"{\"action\":\"delete\",\"job_id\":\"cron_xxx\"}\n" +
-			"```\n\n" +
-			"List schema:\n\n" +
-			"```acpa-cron\n" +
-			"{\"action\":\"list\"}\n" +
-			"```\n\n" +
-			"Rules:\n\n" +
-			"- For one-time reminders, use `schedule_type` `at` and an RFC3339 `schedule_expr` with timezone offset.\n" +
-			"- For fixed intervals, use `schedule_type` `every` and a Go duration such as `10m`, `2h`, or `24h`.\n" +
-			"- For calendar schedules, use `schedule_type` `cron` and a five-field cron expression.\n" +
-			"- Default `timezone` to `Asia/Shanghai` when the user does not specify one.\n" +
-			"- Default `target` to `isolated` and `delivery` to `origin`.\n" +
-			"- Make `message` self-contained because it will run in a scheduled harness session.\n" +
-			"- Do not claim a reminder or schedule was set unless ACPA executes the block and returns a confirmation.\n",
+			builtInCronProtocol + "\n",
 	},
 }
 

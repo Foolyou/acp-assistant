@@ -50,7 +50,7 @@ First version supports:
 
 ### Harness-facing built-in cron skill
 
-Cron is exposed to the harness as a built-in `acpa-cron` skill injected into managed Codex and Claude overlays. When the user asks for reminders or scheduled work in natural language, the harness is responsible for interpreting the request and returning a fenced `acpa-cron` JSON block. The assistant runtime treats that block as a host tool call, validates authorization and fields, persists the job, and sends the final confirmation or error.
+Cron is exposed to the harness as a built-in `acpa-cron` skill injected into managed Codex and Claude overlays. The same cron protocol is also included in the generated harness prompt prefix so the behavior does not depend on provider-specific skill auto-selection. When the user asks for reminders or scheduled work in natural language, the harness is responsible for interpreting the request and returning a fenced `acpa-cron` JSON block. The assistant runtime treats that block as a host tool call, validates authorization and fields, persists the job, and sends the final confirmation or error.
 
 The supported harness actions are:
 

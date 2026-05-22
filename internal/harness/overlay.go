@@ -251,7 +251,7 @@ func copyDir(source, target string) error {
 }
 
 func combinedInstructions(acpaHome, configspacePath string) (string, error) {
-	var sections []string
+	sections := []string{builtInCronProtocol}
 	for _, path := range []string{
 		filepath.Join(acpaHome, "global", "instructions.md"),
 		filepath.Join(configspacePath, "instructions.md"),
