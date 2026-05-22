@@ -8,6 +8,7 @@ ACP Assistant needs a first-class way for users and operators to schedule recurr
 - Add cron run history so each scheduled execution is auditable and diagnosable.
 - Add a scheduler loop to `assistant serve` that claims due jobs, executes them through the configured harness, records results, and sends delivery messages when configured.
 - Add owner-only `/cron` IM commands for creating, listing, pausing, resuming, removing, manually running, and inspecting scheduled jobs.
+- Add a built-in harness cron skill so natural-language scheduling requests are converted by the harness into structured cron tool calls executed by the assistant runtime.
 - Support `at`, `every`, and basic five-field cron schedules with timezone-aware next-run calculation.
 - Support `origin` and `none` delivery modes for the first version.
 - Keep scheduled runs isolated by default while allowing explicit reuse of the creator's main session.
@@ -28,6 +29,7 @@ ACP Assistant needs a first-class way for users and operators to schedule recurr
 - Store schema gains cron job and cron run tables through a new migration.
 - `internal/model` gains cron job, schedule, delivery, and run types.
 - `internal/store` gains CRUD, due-claiming, completion, and run query methods.
-- `internal/assistant` gains scheduler execution and `/cron` command handling.
+- `internal/assistant` gains scheduler execution, `/cron` command handling, and execution of structured harness cron tool calls.
+- `internal/harness` injects the built-in `acpa-cron` skill into managed Codex and Claude overlays.
 - `cmd/acpa assistant serve` starts and stops the cron scheduler alongside connector accounts and permission expiry.
 - Tests cover schedule parsing, store claiming semantics, command authorization, execution, delivery, and run history.

@@ -16,6 +16,7 @@
 - [x] 3.1 Add owner/admin-only `/cron` command parsing for add, list, pause, resume, remove, run, and runs.
 - [x] 3.2 Format cron command responses with job IDs, schedules, enabled state, next run time, and recent run status.
 - [x] 3.3 Prevent cron-originated prompts from managing cron jobs recursively.
+- [x] 3.4 Add a built-in harness cron skill and execute structured create/delete/list tool calls returned by the harness.
 
 ## 4. Integration And Verification
 

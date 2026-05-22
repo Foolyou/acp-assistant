@@ -22,6 +22,18 @@ The system SHALL restrict `/cron` management commands to owner/admin users.
 - **WHEN** a non-owner user sends `/cron add --every 1h --message "check status"`
 - **THEN** the system rejects the command without creating a job
 
+### Requirement: Harness cron skill
+The system SHALL inject a built-in cron skill into managed harness overlays and execute structured cron tool calls returned by the harness for owner/admin users.
+
+#### Scenario: Harness creates cron job
+- **WHEN** an owner asks for a reminder in natural language
+- **AND** the harness returns a valid `acpa-cron` create block
+- **THEN** the system creates the cron job and sends a confirmation instead of relaying the raw tool block
+
+#### Scenario: Non-owner cron tool denied
+- **WHEN** a non-owner message causes the harness to return an `acpa-cron` block
+- **THEN** the system rejects the tool call without creating or mutating cron jobs
+
 ### Requirement: Due job claiming
 The system SHALL atomically claim due enabled jobs before execution so a job run is started at most once per due time.
 

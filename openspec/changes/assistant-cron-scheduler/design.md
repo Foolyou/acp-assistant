@@ -11,6 +11,7 @@ Cron must therefore live inside the assistant worker runtime rather than in syst
 - Persist scheduled jobs and runs in each assistant's SQLite store.
 - Execute due jobs from `assistant serve` using the configured harness.
 - Provide owner/admin-only `/cron` commands through IM.
+- Provide a built-in harness cron skill for model-mediated create/delete/list operations.
 - Support one-time, fixed-interval, and five-field cron schedules.
 - Make each run auditable with status, timestamps, final text, and errors.
 - Deliver successful results back to the creating IM route by default, with opt-out delivery.
@@ -18,7 +19,7 @@ Cron must therefore live inside the assistant worker runtime rather than in syst
 
 **Non-Goals:**
 
-- Natural-language schedule parsing.
+- Host-side natural-language schedule parsing.
 - Script-only jobs, pre-run shell hooks, job chaining, or per-job toolset controls.
 - Console UI for managing jobs.
 - Cross-assistant or global cron jobs.
@@ -47,9 +48,21 @@ First version supports:
 
 `isolated` is the default because scheduled prompts must be self-contained and should not unexpectedly pollute user chat context. `main` remains available for reminders and jobs that intentionally continue the owner conversation.
 
-### Command-first management surface
+### Harness-facing built-in cron skill
 
-The first management surface is `/cron` inside IM:
+Cron is exposed to the harness as a built-in `acpa-cron` skill injected into managed Codex and Claude overlays. When the user asks for reminders or scheduled work in natural language, the harness is responsible for interpreting the request and returning a fenced `acpa-cron` JSON block. The assistant runtime treats that block as a host tool call, validates authorization and fields, persists the job, and sends the final confirmation or error.
+
+The supported harness actions are:
+
+- `create`: create a job with `schedule_type`, `schedule_expr`, `timezone`, `message`, `target`, and `delivery`.
+- `delete`: remove a job by `job_id`.
+- `list`: list assistant cron jobs.
+
+This avoids a narrow runtime regex parser while keeping persistence, authorization, and execution deterministic in the host.
+
+### Command management surface
+
+The deterministic operator surface is `/cron` inside IM:
 
 - `/cron add --every <duration> --name <name> --message <prompt>`
 - `/cron add --at <time> --name <name> --message <prompt>`
@@ -63,7 +76,7 @@ The first management surface is `/cron` inside IM:
 
 Only owner/admin users can mutate jobs. Listing and runs are also owner/admin-only in the first version because jobs may contain private prompts.
 
-Alternative considered: model-facing `cronjob` tool first. It is useful later, but IM command management gives operators deterministic behavior and a smaller safety surface.
+The command surface remains useful for exact operator control and debugging even though the harness skill is the preferred path for natural-language scheduling requests.
 
 ### Delivery modes
 
@@ -80,7 +93,7 @@ The scheduler will store `next_run_at` in UTC. `at` jobs run once and are disabl
 
 ## Risks / Trade-offs
 
-- Cron syntax ambiguity -> Keep first-version parser small, document five-field support, and reject unsupported forms with explicit errors.
+- Cron syntax ambiguity -> Keep host schedule parsing small, let the harness interpret natural language, document five-field support, and reject unsupported structured forms with explicit errors.
 - Duplicate execution on fast ticks or slow runs -> Use store-level claiming and per-job max concurrency of one.
 - Long-running jobs blocking scheduler progress -> Run claimed jobs in separate goroutines and mark timed-out jobs when context deadline is reached.
 - Prompts lacking context -> Default to isolated sessions and require `/cron add --message` prompts to be self-contained.

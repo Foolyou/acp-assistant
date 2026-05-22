@@ -128,6 +128,7 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(codexHome, "config.toml"),
 		filepath.Join(codexHome, "auth.json"),
+		filepath.Join(codexHome, "skills", "acpa-built-in-cron", "SKILL.md"),
 		filepath.Join(codexHome, "skills", "acpa-global-global-skill", "SKILL.md"),
 		filepath.Join(codexHome, "skills", "acpa-assistant-assistant-skill", "SKILL.md"),
 	} {
@@ -175,6 +176,7 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	}
 	for _, path := range []string{
 		filepath.Join(claudePlugin, ".claude-plugin", "plugin.json"),
+		filepath.Join(claudePlugin, "skills", "acpa-built-in-cron", "SKILL.md"),
 		filepath.Join(claudePlugin, "skills", "acpa-global-global-skill", "SKILL.md"),
 		filepath.Join(claudePlugin, "skills", "acpa-assistant-assistant-skill", "SKILL.md"),
 	} {

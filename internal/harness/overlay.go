@@ -169,7 +169,7 @@ func removeManagedSkills(targetSkillsDir string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasPrefix(name, "acpa-global") || strings.HasPrefix(name, "acpa-assistant") {
+		if strings.HasPrefix(name, "acpa-built-in") || strings.HasPrefix(name, "acpa-global") || strings.HasPrefix(name, "acpa-assistant") {
 			if err := os.RemoveAll(filepath.Join(targetSkillsDir, name)); err != nil {
 				return err
 			}
@@ -179,6 +179,9 @@ func removeManagedSkills(targetSkillsDir string) error {
 }
 
 func copyACPASkills(targetSkillsDir, acpaHome, configspacePath string) error {
+	if err := writeBuiltInSkills(targetSkillsDir); err != nil {
+		return err
+	}
 	if err := copySkillSource(filepath.Join(acpaHome, "global", "skills"), targetSkillsDir, "acpa-global"); err != nil {
 		return err
 	}

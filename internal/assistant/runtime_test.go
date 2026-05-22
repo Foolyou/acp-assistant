@@ -481,7 +481,7 @@ func TestRuntimeCronCommandsRequireOwnerAndCreateJobs(t *testing.T) {
 	}
 }
 
-func TestRuntimeNaturalLanguageReminderCreatesCronJob(t *testing.T) {
+func TestRuntimeExecutesHarnessCronToolCreate(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
@@ -491,7 +491,7 @@ func TestRuntimeNaturalLanguageReminderCreatesCronJob(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	h := &fakeHarness{}
+	h := &fakeHarness{finalText: "```acpa-cron\n{\"action\":\"create\",\"name\":\"sleep reminder\",\"schedule_type\":\"at\",\"schedule_expr\":\"2099-05-23T01:10:00+08:00\",\"timezone\":\"Asia/Shanghai\",\"message\":\"提醒我睡觉\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n```"}
 	s := &fakeSender{}
 	rt := assistant.NewRuntime(assistant.RuntimeConfig{
 		AssistantID: "alpha",
@@ -516,10 +516,10 @@ func TestRuntimeNaturalLanguageReminderCreatesCronJob(t *testing.T) {
 		Text:             "三分钟后提醒我睡觉",
 	}
 	if err := rt.HandleInbound(ctx, msg); err != nil {
-		t.Fatalf("natural language reminder: %v", err)
+		t.Fatalf("harness cron tool create: %v", err)
 	}
-	if len(h.prompts) != 0 {
-		t.Fatalf("natural language reminder should not go through harness, got %#v", h.prompts)
+	if len(h.prompts) != 1 || h.prompts[0].Text != "三分钟后提醒我睡觉" {
+		t.Fatalf("natural language request should go through harness first, got %#v", h.prompts)
 	}
 	jobs, err := db.ListCronJobs(ctx, "alpha")
 	if err != nil {
@@ -531,11 +531,87 @@ func TestRuntimeNaturalLanguageReminderCreatesCronJob(t *testing.T) {
 	if jobs[0].ScheduleType != model.CronScheduleTypeAt || jobs[0].Prompt != "提醒我睡觉" || jobs[0].DeliveryMode != model.CronDeliveryOrigin {
 		t.Fatalf("unexpected reminder job: %#v", jobs[0])
 	}
-	if jobs[0].NextRunAt.Before(time.Now().UTC().Add(2*time.Minute)) || jobs[0].NextRunAt.After(time.Now().UTC().Add(4*time.Minute)) {
-		t.Fatalf("reminder next run should be about three minutes out, got %s", jobs[0].NextRunAt)
+	wantNext := time.Date(2099, 5, 22, 17, 10, 0, 0, time.UTC)
+	if !jobs[0].NextRunAt.Equal(wantNext) {
+		t.Fatalf("unexpected next run: got %s want %s", jobs[0].NextRunAt, wantNext)
 	}
-	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "提醒已创建") || !strings.Contains(s.messages[0].Text, "睡觉") {
-		t.Fatalf("expected reminder confirmation, got %#v", s.messages)
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Cron job created") || strings.Contains(s.messages[0].Text, "acpa-cron") {
+		t.Fatalf("expected cron tool confirmation without raw tool block, got %#v", s.messages)
+	}
+}
+
+func TestRuntimeExecutesHarnessCronToolListAndDelete(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	owner := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "owner-a",
+		MessageID:        "m1",
+		Text:             "列出提醒",
+	}
+	job, err := db.CreateCronJob(ctx, model.CronJob{
+		AssistantID:  "alpha",
+		Name:         "daily",
+		Enabled:      true,
+		ScheduleType: model.CronScheduleTypeEvery,
+		ScheduleExpr: "24h",
+		Timezone:     "UTC",
+		Prompt:       "daily check",
+		Target:       model.CronTargetIsolated,
+		DeliveryMode: model.CronDeliveryOrigin,
+		Creator:      owner.BindingKey(),
+		NextRunAt:    time.Date(2099, 5, 23, 8, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	h := &fakeHarness{finalText: "```acpa-cron\n{\"action\":\"list\"}\n```"}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+		ChannelOptions: map[string]map[string]string{
+			"feishu/main": {"owner_open_id": "owner-a"},
+		},
+	})
+	if err := rt.HandleInbound(ctx, owner); err != nil {
+		t.Fatalf("harness cron tool list: %v", err)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, job.ID) || strings.Contains(s.messages[0].Text, "acpa-cron") {
+		t.Fatalf("expected list response without raw tool block, got %#v", s.messages)
+	}
+	deleteMsg := owner
+	deleteMsg.MessageID = "m2"
+	deleteMsg.Text = "删除这个提醒"
+	h.finalText = "```acpa-cron\n{\"action\":\"delete\",\"job_id\":\"" + job.ID + "\"}\n```"
+	if err := rt.HandleInbound(ctx, deleteMsg); err != nil {
+		t.Fatalf("harness cron tool delete: %v", err)
+	}
+	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Cron job removed: "+job.ID) {
+		t.Fatalf("expected delete confirmation, got %#v", s.messages)
+	}
+	jobs, err := db.ListCronJobs(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("list cron jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("delete tool should remove job, got %#v", jobs)
 	}
 }
 

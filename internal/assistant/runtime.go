@@ -3,10 +3,10 @@ package assistant
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -50,7 +50,19 @@ type Runtime struct {
 
 type cronContextKey struct{}
 
-var relativeReminderPattern = regexp.MustCompile(`^\s*([0-9一二两三四五六七八九十]+)\s*(分钟|小时|天)后\s*提醒我\s*(.+?)\s*$`)
+var harnessCronToolPattern = regexp.MustCompile("(?s)```acpa-cron\\s*(.*?)\\s*```")
+
+type harnessCronToolCall struct {
+	Action       string `json:"action"`
+	JobID        string `json:"job_id,omitempty"`
+	Name         string `json:"name,omitempty"`
+	ScheduleType string `json:"schedule_type,omitempty"`
+	ScheduleExpr string `json:"schedule_expr,omitempty"`
+	Timezone     string `json:"timezone,omitempty"`
+	Message      string `json:"message,omitempty"`
+	Target       string `json:"target,omitempty"`
+	Delivery     string `json:"delivery,omitempty"`
+}
 
 type EnsureSessionRequest struct {
 	LocalSessionID    string
@@ -153,9 +165,6 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 		}
 		return nil
 	}
-	if handled, err := r.handleNaturalReminder(ctx, msg); handled || err != nil {
-		return err
-	}
 	session, err := r.ensureActiveSession(ctx, key)
 	if err != nil {
 		return err
@@ -182,6 +191,9 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 	}
 	result, err := r.cfg.Harness.Prompt(ctx, PromptRequest{LocalSessionID: session.ID, ACPSessionID: session.ACPSessionID, Text: msg.Text})
 	if err != nil {
+		return err
+	}
+	if handled, err := r.handleHarnessCronTool(ctx, msg, result.FinalText); handled || err != nil {
 		return err
 	}
 	if r.cfg.Sender != nil && strings.TrimSpace(result.FinalText) != "" {
@@ -339,113 +351,90 @@ func (r *Runtime) ExpirePermissions(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-func (r *Runtime) handleNaturalReminder(ctx context.Context, msg model.InboundMessage) (bool, error) {
-	matches := relativeReminderPattern.FindStringSubmatch(msg.Text)
+func (r *Runtime) handleHarnessCronTool(ctx context.Context, msg model.InboundMessage, text string) (bool, error) {
+	matches := harnessCronToolPattern.FindStringSubmatch(text)
 	if matches == nil {
 		return false, nil
 	}
 	if !r.isOwnerAdmin(msg.BindingKey()) {
-		return true, r.sendCommandReply(ctx, msg, "Owner permission is required for reminders.")
+		return true, r.sendCommandReply(ctx, msg, "Owner permission is required for cron tools.")
 	}
-	amount, ok := parseReminderNumber(matches[1])
-	if !ok || amount <= 0 {
-		return true, r.sendCommandReply(ctx, msg, "Command failed: reminder time is invalid.")
+	var call harnessCronToolCall
+	if err := json.Unmarshal([]byte(strings.TrimSpace(matches[1])), &call); err != nil {
+		return true, r.sendCommandReply(ctx, msg, "Command failed: invalid cron tool JSON: "+err.Error())
 	}
-	var delay time.Duration
-	switch matches[2] {
-	case "分钟":
-		delay = time.Duration(amount) * time.Minute
-	case "小时":
-		delay = time.Duration(amount) * time.Hour
-	case "天":
-		delay = time.Duration(amount) * 24 * time.Hour
-	default:
-		return true, r.sendCommandReply(ctx, msg, "Command failed: reminder unit is invalid.")
-	}
-	target := strings.TrimSpace(matches[3])
-	if target == "" {
-		return true, r.sendCommandReply(ctx, msg, "Command failed: reminder text is empty.")
-	}
-	now := time.Now().UTC()
-	next := now.Add(delay)
-	policy := r.effectivePolicy(msg.BindingKey())
-	mode := policy.DefaultMode
-	if mode == "" {
-		mode = model.PermissionManual
-	}
-	job, err := r.cfg.Store.CreateCronJob(ctx, model.CronJob{
-		AssistantID:    msg.AssistantID,
-		Name:           "reminder",
-		Enabled:        true,
-		ScheduleType:   model.CronScheduleTypeAt,
-		ScheduleExpr:   next.Format(time.RFC3339),
-		Timezone:       "UTC",
-		Prompt:         "提醒我" + target,
-		Target:         model.CronTargetIsolated,
-		DeliveryMode:   model.CronDeliveryOrigin,
-		Creator:        msg.BindingKey(),
-		PermissionMode: mode,
-		NextRunAt:      next,
-	})
+	reply, err := r.executeHarnessCronTool(ctx, msg, call)
 	if err != nil {
-		return true, err
+		return true, r.sendCommandReply(ctx, msg, "Command failed: "+err.Error())
 	}
-	reply := fmt.Sprintf("提醒已创建：%s；将在 %s 提醒我%s。", job.ID, next.In(time.Local).Format("15:04"), target)
+	if strings.TrimSpace(reply) == "" {
+		return true, nil
+	}
 	return true, r.sendCommandReply(ctx, msg, reply)
 }
 
-func parseReminderNumber(raw string) (int, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, false
-	}
-	if n, err := strconv.Atoi(raw); err == nil {
-		return n, true
-	}
-	if raw == "两" {
-		return 2, true
-	}
-	values := map[rune]int{'一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
-	if raw == "十" {
-		return 10, true
-	}
-	runes := []rune(raw)
-	if len(runes) == 1 {
-		n, ok := values[runes[0]]
-		return n, ok
-	}
-	if strings.ContainsRune(raw, '十') {
-		parts := strings.Split(raw, "十")
-		if len(parts) != 2 {
-			return 0, false
+func (r *Runtime) executeHarnessCronTool(ctx context.Context, msg model.InboundMessage, call harnessCronToolCall) (string, error) {
+	switch normalizeHarnessCronAction(call.Action) {
+	case "create":
+		opts := cronCommandOptions{
+			Name:         defaultString(call.Name, "cron job"),
+			ScheduleType: model.CronScheduleType(strings.TrimSpace(call.ScheduleType)),
+			ScheduleExpr: strings.TrimSpace(call.ScheduleExpr),
+			Timezone:     defaultString(call.Timezone, "UTC"),
+			Prompt:       strings.TrimSpace(call.Message),
+			Target:       model.CronTarget(defaultString(call.Target, string(model.CronTargetIsolated))),
+			DeliveryMode: model.CronDeliveryMode(defaultString(call.Delivery, string(model.CronDeliveryOrigin))),
 		}
-		tens := 1
-		if parts[0] != "" {
-			r := []rune(parts[0])
-			if len(r) != 1 {
-				return 0, false
-			}
-			var ok bool
-			tens, ok = values[r[0]]
-			if !ok {
-				return 0, false
-			}
+		if opts.ScheduleType != model.CronScheduleTypeAt && opts.ScheduleType != model.CronScheduleTypeEvery && opts.ScheduleType != model.CronScheduleTypeCron {
+			return "", fmt.Errorf("unsupported schedule type %q", call.ScheduleType)
 		}
-		ones := 0
-		if parts[1] != "" {
-			r := []rune(parts[1])
-			if len(r) != 1 {
-				return 0, false
-			}
-			var ok bool
-			ones, ok = values[r[0]]
-			if !ok {
-				return 0, false
-			}
+		if opts.ScheduleExpr == "" {
+			return "", fmt.Errorf("schedule_expr is required")
 		}
-		return tens*10 + ones, true
+		if opts.Prompt == "" {
+			return "", fmt.Errorf("message is required")
+		}
+		if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain {
+			return "", fmt.Errorf("unsupported cron target %q", opts.Target)
+		}
+		if opts.DeliveryMode != model.CronDeliveryOrigin && opts.DeliveryMode != model.CronDeliveryNone {
+			return "", fmt.Errorf("unsupported delivery mode %q", opts.DeliveryMode)
+		}
+		job, err := r.createCronJob(ctx, msg, opts)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Cron job created: %s %s next %s", job.ID, job.Name, formatCommandTime(job.NextRunAt)), nil
+	case "delete":
+		jobID := strings.TrimSpace(call.JobID)
+		if jobID == "" {
+			return "", fmt.Errorf("job_id is required")
+		}
+		if err := r.cfg.Store.RemoveCronJob(ctx, msg.AssistantID, jobID); err != nil {
+			return "", err
+		}
+		return "Cron job removed: " + jobID, nil
+	case "list":
+		return r.commandCronList(ctx, msg.BindingKey())
+	default:
+		return "", fmt.Errorf("unsupported cron tool action %q", call.Action)
 	}
-	return 0, false
+}
+
+func normalizeHarnessCronAction(action string) string {
+	action = strings.ToLower(strings.TrimSpace(action))
+	action = strings.TrimPrefix(action, "cron")
+	if action == "remove" {
+		return "delete"
+	}
+	return action
+}
+
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
 }
 
 func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {
@@ -898,10 +887,18 @@ func (r *Runtime) commandCronAdd(ctx context.Context, msg model.InboundMessage, 
 	if strings.TrimSpace(opts.Prompt) == "" {
 		return "", commandError{Category: commandErrorFailure, Message: "/cron add requires --message"}
 	}
+	job, err := r.createCronJob(ctx, msg, opts)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Cron job created: %s %s next %s", job.ID, job.Name, formatCommandTime(job.NextRunAt)), nil
+}
+
+func (r *Runtime) createCronJob(ctx context.Context, msg model.InboundMessage, opts cronCommandOptions) (model.CronJob, error) {
 	now := time.Now().UTC()
 	next, err := cronpkg.NextRun(opts.ScheduleType, opts.ScheduleExpr, opts.Timezone, now, now)
 	if err != nil {
-		return "", commandError{Category: commandErrorFailure, Message: err.Error()}
+		return model.CronJob{}, err
 	}
 	policy := r.effectivePolicy(msg.BindingKey())
 	mode := policy.DefaultMode
@@ -923,9 +920,9 @@ func (r *Runtime) commandCronAdd(ctx context.Context, msg model.InboundMessage, 
 		NextRunAt:      next,
 	})
 	if err != nil {
-		return "", err
+		return model.CronJob{}, err
 	}
-	return fmt.Sprintf("Cron job created: %s %s next %s", job.ID, job.Name, formatCommandTime(job.NextRunAt)), nil
+	return job, nil
 }
 
 func (r *Runtime) commandCronList(ctx context.Context, key model.SessionBindingKey) (string, error) {
