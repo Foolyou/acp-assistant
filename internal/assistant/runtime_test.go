@@ -671,6 +671,9 @@ func TestRuntimeExecutesCronRunAndDeliversResult(t *testing.T) {
 	if len(h.prompts) != 1 || h.prompts[0].Text != "summarize workspace" {
 		t.Fatalf("cron prompt not dispatched: %#v", h.prompts)
 	}
+	if !h.prompts[0].SuppressPromptPrefix {
+		t.Fatalf("cron prompt should suppress harness management prefix: %#v", h.prompts[0])
+	}
 	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "reply: summarize workspace") || s.messages[0].PlatformUserID != "owner-a" {
 		t.Fatalf("cron result should be delivered to origin, got %#v", s.messages)
 	}
@@ -687,74 +690,6 @@ func TestRuntimeExecutesCronRunAndDeliversResult(t *testing.T) {
 	}
 	if !loaded.Enabled || !loaded.NextRunAt.Equal(job.NextRunAt) {
 		t.Fatalf("manual run should preserve schedule, got %#v", loaded)
-	}
-}
-
-func TestRuntimeDirectCronRunDeliversPromptWithoutHarness(t *testing.T) {
-	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	h := &fakeHarness{}
-	s := &fakeSender{}
-	rt := assistant.NewRuntime(assistant.RuntimeConfig{
-		AssistantID: "alpha",
-		Provider:    model.ProviderCodex,
-		Store:       db,
-		Harness:     h,
-		Sender:      s,
-		Policy: model.PolicySet{
-			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
-		},
-	})
-	now := time.Date(2026, 5, 23, 8, 0, 0, 0, time.UTC)
-	creator := model.SessionBindingKey{
-		AssistantID:      "alpha",
-		Platform:         model.PlatformFeishu,
-		AccountID:        "main",
-		PrivateChannelID: "chat-a",
-		PlatformUserID:   "owner-a",
-	}
-	job, err := db.CreateCronJob(ctx, model.CronJob{
-		AssistantID:  "alpha",
-		Name:         "sleep",
-		Enabled:      true,
-		ScheduleType: model.CronScheduleTypeAt,
-		ScheduleExpr: now.Add(time.Minute).Format(time.RFC3339),
-		Timezone:     "UTC",
-		Prompt:       "该睡觉啦！",
-		Target:       model.CronTargetDirect,
-		DeliveryMode: model.CronDeliveryOrigin,
-		Creator:      creator,
-		NextRunAt:    now.Add(time.Minute),
-	})
-	if err != nil {
-		t.Fatalf("create direct job: %v", err)
-	}
-	run, err := db.CreateManualCronRun(ctx, "alpha", job.ID, now)
-	if err != nil {
-		t.Fatalf("manual run: %v", err)
-	}
-	if err := rt.ExecuteCronRun(ctx, run); err != nil {
-		t.Fatalf("execute direct run: %v", err)
-	}
-	if len(h.prompts) != 0 {
-		t.Fatalf("direct cron run should not invoke harness, got %#v", h.prompts)
-	}
-	if len(s.messages) != 1 || s.messages[0].Text != "该睡觉啦！" {
-		t.Fatalf("direct cron run should deliver prompt exactly, got %#v", s.messages)
-	}
-	completed, err := db.CronRun(ctx, run.ID)
-	if err != nil {
-		t.Fatalf("load run: %v", err)
-	}
-	if completed.Status != model.CronRunStatusSucceeded || completed.FinalText != "该睡觉啦！" || completed.LocalSessionID != "" {
-		t.Fatalf("direct run should record prompt without session ids, got %#v", completed)
 	}
 }
 

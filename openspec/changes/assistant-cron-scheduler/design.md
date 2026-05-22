@@ -43,11 +43,10 @@ Alternative considered: daemon-owned scheduler. That would require the daemon to
 
 First version supports:
 
-- `direct`: deliver the stored prompt text directly without invoking the harness.
 - `isolated`: create or use a cron-specific local session for scheduled work.
 - `main`: reuse the creator's owner binding active session.
 
-`direct` is preferred for simple reminders because the expected output is already known and should not be reinterpreted by a harness. `isolated` is the default for scheduled assistant work because scheduled prompts must be self-contained and should not unexpectedly pollute user chat context. `main` remains available for jobs that intentionally continue the owner conversation.
+`isolated` is the default for reminders and scheduled assistant work because scheduled prompts must be self-contained and should not unexpectedly pollute user chat context. `main` remains available for jobs that intentionally continue the owner conversation. Cron execution still goes through the harness, but the runtime suppresses the cron-management prompt prefix for scheduled runs so the harness receives the scheduled prompt as the task instruction rather than as a follow-up to tool-use instructions.
 
 ### Harness-facing built-in cron skill
 

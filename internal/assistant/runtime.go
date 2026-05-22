@@ -79,9 +79,10 @@ type EnsureSessionResult struct {
 }
 
 type PromptRequest struct {
-	LocalSessionID string
-	ACPSessionID   string
-	Text           string
+	LocalSessionID       string
+	ACPSessionID         string
+	Text                 string
+	SuppressPromptPrefix bool
 }
 
 type PromptResult struct {
@@ -394,7 +395,7 @@ func (r *Runtime) executeHarnessCronTool(ctx context.Context, msg model.InboundM
 		if opts.Prompt == "" {
 			return "", fmt.Errorf("message is required")
 		}
-		if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain && opts.Target != model.CronTargetDirect {
+		if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain {
 			return "", fmt.Errorf("unsupported cron target %q", opts.Target)
 		}
 		if opts.DeliveryMode != model.CronDeliveryOrigin && opts.DeliveryMode != model.CronDeliveryNone {
@@ -472,9 +473,7 @@ func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {
 		}
 	}
 
-	if errorText == "" && job.Target == model.CronTargetDirect {
-		finalText = job.Prompt
-	} else if errorText == "" {
+	if errorText == "" {
 		session, err := r.ensureCronSession(ctx, job)
 		if err != nil {
 			status = model.CronRunStatusFailed
@@ -509,7 +508,12 @@ func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {
 				externalSessionID = session.ExternalSessionID
 			}
 			if errorText == "" {
-				result, err := r.cfg.Harness.Prompt(ctx, PromptRequest{LocalSessionID: session.ID, ACPSessionID: session.ACPSessionID, Text: job.Prompt})
+				result, err := r.cfg.Harness.Prompt(ctx, PromptRequest{
+					LocalSessionID:       session.ID,
+					ACPSessionID:         session.ACPSessionID,
+					Text:                 job.Prompt,
+					SuppressPromptPrefix: true,
+				})
 				if err != nil {
 					status = model.CronRunStatusFailed
 					errorText = err.Error()
@@ -1057,7 +1061,7 @@ func parseCronOptions(args []string) (cronCommandOptions, error) {
 				return opts, fmt.Errorf("--target requires a value")
 			}
 			opts.Target = model.CronTarget(args[i])
-			if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain && opts.Target != model.CronTargetDirect {
+			if opts.Target != model.CronTargetIsolated && opts.Target != model.CronTargetMain {
 				return opts, fmt.Errorf("unsupported cron target %q", args[i])
 			}
 		case "--deliver":

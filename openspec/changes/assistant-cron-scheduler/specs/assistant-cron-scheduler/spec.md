@@ -46,11 +46,7 @@ The system SHALL atomically claim due enabled jobs before execution so a job run
 - **THEN** the system does not claim another run for the same job
 
 ### Requirement: Scheduled execution
-The system SHALL execute claimed cron runs according to their target: direct delivery, isolated harness session, or main harness session.
-
-#### Scenario: Direct execution
-- **WHEN** a due job targets `direct`
-- **THEN** the system records the stored prompt as the run final text without prompting the harness
+The system SHALL execute claimed cron runs through an isolated harness session or a main harness session according to their target.
 
 #### Scenario: Isolated execution
 - **WHEN** a due job targets `isolated`
@@ -59,6 +55,10 @@ The system SHALL execute claimed cron runs according to their target: direct del
 #### Scenario: Main session execution
 - **WHEN** a due job targets `main`
 - **THEN** the system executes the prompt through the creator binding's active session
+
+#### Scenario: Management prefix omitted during execution
+- **WHEN** a due job is prompted through the harness
+- **THEN** the runtime suppresses the cron-management prompt prefix for that scheduled prompt
 
 ### Requirement: Run history
 The system SHALL record each cron run with status, timestamps, final text, error text, and related session identifiers.

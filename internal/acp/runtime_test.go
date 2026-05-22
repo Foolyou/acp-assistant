@@ -216,6 +216,31 @@ func TestRuntimePromptPrependsConfiguredPrefix(t *testing.T) {
 	}
 }
 
+func TestRuntimePromptCanSuppressConfiguredPrefix(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "prompt_prefix_suppressed")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimePromptCanSuppressConfiguredPrefix")
+	rt := acp.NewRuntime(acp.Config{
+		Command:      cmd.Path,
+		Args:         cmd.Args[1:],
+		Workspace:    t.TempDir(),
+		PromptPrefix: "fixed instructions",
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+	if _, err := rt.PromptWithOptions(ctx, "session-1", "cron payload", acp.PromptOptions{SuppressPrefix: true}); err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+}
+
 func TestRuntimePromptReturnsAgentTextChunks(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()
@@ -423,7 +448,7 @@ func runACPHelperProcess() {
 				"result":  map[string]any{"sessionId": "loaded-" + payload.SessionID},
 			})
 		case "session/prompt":
-			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix" {
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix" || os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix_suppressed" {
 				promptCount++
 				var payload struct {
 					Prompt []struct {
@@ -432,7 +457,16 @@ func runACPHelperProcess() {
 					} `json:"prompt"`
 				}
 				_ = json.Unmarshal(req.Params, &payload)
-				if promptCount == 1 && (len(payload.Prompt) != 2 || payload.Prompt[0].Text != "fixed instructions" || payload.Prompt[1].Text != "hello") {
+				if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix_suppressed" {
+					if len(payload.Prompt) != 1 || payload.Prompt[0].Text != "cron payload" {
+						_ = encoder.Encode(map[string]any{
+							"jsonrpc": "2.0",
+							"id":      req.ID,
+							"error":   map[string]any{"code": -32602, "message": "prompt prefix was not suppressed"},
+						})
+						continue
+					}
+				} else if promptCount == 1 && (len(payload.Prompt) != 2 || payload.Prompt[0].Text != "fixed instructions" || payload.Prompt[1].Text != "hello") {
 					_ = encoder.Encode(map[string]any{
 						"jsonrpc": "2.0",
 						"id":      req.ID,

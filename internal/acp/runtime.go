@@ -52,6 +52,10 @@ type Config struct {
 	OnPromptText func(sessionID, text string)
 }
 
+type PromptOptions struct {
+	SuppressPrefix bool
+}
+
 type Event struct {
 	Method string
 	Params json.RawMessage
@@ -286,12 +290,16 @@ func (r *Runtime) applyConfiguredEffort(ctx context.Context, sessionID string) e
 }
 
 func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) (string, error) {
+	return r.PromptWithOptions(ctx, sessionID, text, PromptOptions{})
+}
+
+func (r *Runtime) PromptWithOptions(ctx context.Context, sessionID, text string, opts PromptOptions) (string, error) {
 	collector := r.registerPromptCollector(sessionID)
 	defer r.unregisterPromptCollector(sessionID, collector)
 
 	var result map[string]any
 	prompt := []map[string]any{}
-	if r.shouldSendPromptPrefix(sessionID) {
+	if !opts.SuppressPrefix && r.shouldSendPromptPrefix(sessionID) {
 		prompt = append(prompt, map[string]any{"type": "text", "text": r.cfg.PromptPrefix})
 	}
 	prompt = append(prompt, map[string]any{"type": "text", "text": text})

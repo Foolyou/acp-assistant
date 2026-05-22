@@ -992,7 +992,7 @@ func (h *runtimeHarness) Prompt(ctx context.Context, req assistant.PromptRequest
 	if err != nil {
 		return assistant.PromptResult{}, err
 	}
-	finalText, err := runtime.Prompt(ctx, req.ACPSessionID, req.Text)
+	finalText, err := runtime.PromptWithOptions(ctx, req.ACPSessionID, req.Text, acp.PromptOptions{SuppressPrefix: req.SuppressPromptPrefix})
 	if err != nil {
 		return assistant.PromptResult{}, err
 	}
