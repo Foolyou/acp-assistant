@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,8 @@ type Runtime struct {
 }
 
 type cronContextKey struct{}
+
+var relativeReminderPattern = regexp.MustCompile(`^\s*([0-9一二两三四五六七八九十]+)\s*(分钟|小时|天)后\s*提醒我\s*(.+?)\s*$`)
 
 type EnsureSessionRequest struct {
 	LocalSessionID    string
@@ -148,6 +152,9 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 			return r.sendCommandReply(ctx, msg, result.Text)
 		}
 		return nil
+	}
+	if handled, err := r.handleNaturalReminder(ctx, msg); handled || err != nil {
+		return err
 	}
 	session, err := r.ensureActiveSession(ctx, key)
 	if err != nil {
@@ -330,6 +337,115 @@ func (r *Runtime) ExpirePermissions(ctx context.Context, now time.Time) error {
 		})
 	}
 	return nil
+}
+
+func (r *Runtime) handleNaturalReminder(ctx context.Context, msg model.InboundMessage) (bool, error) {
+	matches := relativeReminderPattern.FindStringSubmatch(msg.Text)
+	if matches == nil {
+		return false, nil
+	}
+	if !r.isOwnerAdmin(msg.BindingKey()) {
+		return true, r.sendCommandReply(ctx, msg, "Owner permission is required for reminders.")
+	}
+	amount, ok := parseReminderNumber(matches[1])
+	if !ok || amount <= 0 {
+		return true, r.sendCommandReply(ctx, msg, "Command failed: reminder time is invalid.")
+	}
+	var delay time.Duration
+	switch matches[2] {
+	case "分钟":
+		delay = time.Duration(amount) * time.Minute
+	case "小时":
+		delay = time.Duration(amount) * time.Hour
+	case "天":
+		delay = time.Duration(amount) * 24 * time.Hour
+	default:
+		return true, r.sendCommandReply(ctx, msg, "Command failed: reminder unit is invalid.")
+	}
+	target := strings.TrimSpace(matches[3])
+	if target == "" {
+		return true, r.sendCommandReply(ctx, msg, "Command failed: reminder text is empty.")
+	}
+	now := time.Now().UTC()
+	next := now.Add(delay)
+	policy := r.effectivePolicy(msg.BindingKey())
+	mode := policy.DefaultMode
+	if mode == "" {
+		mode = model.PermissionManual
+	}
+	job, err := r.cfg.Store.CreateCronJob(ctx, model.CronJob{
+		AssistantID:    msg.AssistantID,
+		Name:           "reminder",
+		Enabled:        true,
+		ScheduleType:   model.CronScheduleTypeAt,
+		ScheduleExpr:   next.Format(time.RFC3339),
+		Timezone:       "UTC",
+		Prompt:         "提醒我" + target,
+		Target:         model.CronTargetIsolated,
+		DeliveryMode:   model.CronDeliveryOrigin,
+		Creator:        msg.BindingKey(),
+		PermissionMode: mode,
+		NextRunAt:      next,
+	})
+	if err != nil {
+		return true, err
+	}
+	reply := fmt.Sprintf("提醒已创建：%s；将在 %s 提醒我%s。", job.ID, next.In(time.Local).Format("15:04"), target)
+	return true, r.sendCommandReply(ctx, msg, reply)
+}
+
+func parseReminderNumber(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		return n, true
+	}
+	if raw == "两" {
+		return 2, true
+	}
+	values := map[rune]int{'一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+	if raw == "十" {
+		return 10, true
+	}
+	runes := []rune(raw)
+	if len(runes) == 1 {
+		n, ok := values[runes[0]]
+		return n, ok
+	}
+	if strings.ContainsRune(raw, '十') {
+		parts := strings.Split(raw, "十")
+		if len(parts) != 2 {
+			return 0, false
+		}
+		tens := 1
+		if parts[0] != "" {
+			r := []rune(parts[0])
+			if len(r) != 1 {
+				return 0, false
+			}
+			var ok bool
+			tens, ok = values[r[0]]
+			if !ok {
+				return 0, false
+			}
+		}
+		ones := 0
+		if parts[1] != "" {
+			r := []rune(parts[1])
+			if len(r) != 1 {
+				return 0, false
+			}
+			var ok bool
+			ones, ok = values[r[0]]
+			if !ok {
+				return 0, false
+			}
+		}
+		return tens*10 + ones, true
+	}
+	return 0, false
 }
 
 func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {

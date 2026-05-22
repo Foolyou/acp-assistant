@@ -481,6 +481,64 @@ func TestRuntimeCronCommandsRequireOwnerAndCreateJobs(t *testing.T) {
 	}
 }
 
+func TestRuntimeNaturalLanguageReminderCreatesCronJob(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+		ChannelOptions: map[string]map[string]string{
+			"feishu/main": {"owner_open_id": "owner-a"},
+		},
+	})
+	msg := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "owner-a",
+		MessageID:        "m1",
+		Text:             "三分钟后提醒我睡觉",
+	}
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("natural language reminder: %v", err)
+	}
+	if len(h.prompts) != 0 {
+		t.Fatalf("natural language reminder should not go through harness, got %#v", h.prompts)
+	}
+	jobs, err := db.ListCronJobs(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("list cron jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one cron job, got %#v", jobs)
+	}
+	if jobs[0].ScheduleType != model.CronScheduleTypeAt || jobs[0].Prompt != "提醒我睡觉" || jobs[0].DeliveryMode != model.CronDeliveryOrigin {
+		t.Fatalf("unexpected reminder job: %#v", jobs[0])
+	}
+	if jobs[0].NextRunAt.Before(time.Now().UTC().Add(2*time.Minute)) || jobs[0].NextRunAt.After(time.Now().UTC().Add(4*time.Minute)) {
+		t.Fatalf("reminder next run should be about three minutes out, got %s", jobs[0].NextRunAt)
+	}
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "提醒已创建") || !strings.Contains(s.messages[0].Text, "睡觉") {
+		t.Fatalf("expected reminder confirmation, got %#v", s.messages)
+	}
+}
+
 func TestRuntimeExecutesCronRunAndDeliversResult(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
