@@ -10,6 +10,7 @@ CLAUDE.md
 .DS_Store
 
 # Runtime output
+/acpa
 *.log
 tmp/
 .worktrees/
