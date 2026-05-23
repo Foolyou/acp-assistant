@@ -138,6 +138,18 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	if !strings.Contains(overlay.ManagedInstructions, "host cron protocol") || !strings.Contains(overlay.ManagedInstructions, "```cron") || strings.Contains(overlay.ManagedInstructions, "acpa-cron") {
 		t.Fatalf("managed instructions should include canonical cron protocol only, got %q", overlay.ManagedInstructions)
 	}
+	for _, want := range []string{
+		"Top-level allowed fields are only: action, id, job, patch.",
+		"job allowed fields are only: name, schedule, sessionTarget, payload, delivery.",
+		"Never output legacy or invented fields such as recurring",
+		`"schedule":{"kind":"every","everyMs":3600000}`,
+		`"schedule":{"kind":"cron","expr":"0 9 * * 1-5","tz":"Asia/Shanghai"}`,
+		"For relative user requests like \"in two minutes\", compute an RFC3339 timestamp",
+	} {
+		if !strings.Contains(overlay.ManagedInstructions, want) {
+			t.Fatalf("managed instructions missing cron schema constraint %q:\n%s", want, overlay.ManagedInstructions)
+		}
+	}
 	if !strings.Contains(overlay.ManagedInstructions, "AGENTS.md") || strings.TrimSpace(overlay.PromptPrefix) != "" {
 		t.Fatalf("managed instructions should mention AGENTS.md and prompt prefix should be empty: %#v", overlay)
 	}
