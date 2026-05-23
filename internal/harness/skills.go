@@ -1,7 +1,11 @@
 package harness
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,9 +14,20 @@ import (
 	"github.com/Foolyou/acp-assistant/internal/model"
 )
 
+const managedAssetVersion = "1"
+
 type builtInSkill struct {
-	OverlayName string
-	Content     string
+	Name    string
+	Content string
+}
+
+type ManagedSkillMarker struct {
+	ManagedBy   string `json:"managed_by"`
+	Provider    string `json:"provider"`
+	Asset       string `json:"asset"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	ContentHash string `json:"content_hash"`
 }
 
 const builtInCronProtocol = `ACPA built-in cron protocol:
@@ -38,35 +53,105 @@ List:
 
 Use RFC3339 with an explicit offset for one-time reminders. Use Go durations such as 10m, 2h, or 24h for fixed intervals. Use five-field cron expressions for calendar schedules. Default timezone to Asia/Shanghai and delivery to origin. Use target isolated unless the user explicitly asks the scheduled task to continue the current conversation, in which case use target main. Always make message a self-contained prompt describing exactly what the harness should say or do when the schedule fires. Do not tell the user a reminder or schedule has been created unless you returned an acpa-cron block.`
 
-var builtInSkills = []builtInSkill{
-	{
-		OverlayName: "acpa-built-in-cron",
-		Content: "---\n" +
-			"name: acpa-cron\n" +
-			"description: Create, delete, and list ACPA scheduled reminders and recurring assistant work.\n" +
-			"---\n\n" +
-			"# ACPA Cron\n\n" +
-			builtInCronProtocol + "\n",
-	},
+func builtInSkillsFor(provider model.HarnessProvider) []builtInSkill {
+	_ = provider
+	description := "Create, delete, and list ACPA scheduled reminders and recurring assistant work."
+	return []builtInSkill{
+		{
+			Name: "acpa-cron",
+			Content: "---\n" +
+				"name: acpa-cron\n" +
+				"description: " + description + "\n" +
+				"---\n\n" +
+				"# ACPA Cron\n\n" +
+				builtInCronProtocol + "\n",
+		},
+	}
 }
 
-func ListSkills(acpaHome, configspacePath string, provider model.HarnessProvider) ([]model.SkillInfo, error) {
-	var out []model.SkillInfo
-	out = append(out, builtInSkillInfos(configspacePath, provider)...)
-	sources := []struct {
-		layer  string
-		dir    string
-		prefix string
-	}{
-		{layer: "global", dir: filepath.Join(acpaHome, "global", "skills"), prefix: "acpa-global"},
-		{layer: "assistant", dir: filepath.Join(configspacePath, "skills"), prefix: "acpa-assistant"},
+func MaterializeBuiltInSkills(workspacePath string, provider model.HarnessProvider) error {
+	root := ManagedSkillRoot(workspacePath, provider)
+	if root == "" {
+		return fmt.Errorf("unsupported harness provider %q", provider)
 	}
-	for _, source := range sources {
-		skills, err := listSkillsInSource(source.layer, source.dir, source.prefix, configspacePath, provider)
-		if err != nil {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	if err := ensureManagedSkillGitignore(workspacePath); err != nil {
+		return err
+	}
+	for _, skill := range builtInSkillsFor(provider) {
+		if err := materializeBuiltInSkill(root, provider, skill); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ManagedSkillRoot(workspacePath string, provider model.HarnessProvider) string {
+	switch provider {
+	case model.ProviderCodex:
+		return filepath.Join(workspacePath, ".agents", "skills")
+	case model.ProviderClaude:
+		return filepath.Join(workspacePath, ".claude", "skills")
+	default:
+		return ""
+	}
+}
+
+func ExpectedManagedSkillDirs(workspacePath string, provider model.HarnessProvider) []string {
+	root := ManagedSkillRoot(workspacePath, provider)
+	if root == "" {
+		return nil
+	}
+	skills := builtInSkillsFor(provider)
+	out := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		out = append(out, filepath.Join(root, skill.Name))
+	}
+	return out
+}
+
+func ReadManagedSkillMarker(skillDir string) (ManagedSkillMarker, error) {
+	var marker ManagedSkillMarker
+	data, err := os.ReadFile(filepath.Join(skillDir, ".acpa-managed.json"))
+	if err != nil {
+		return ManagedSkillMarker{}, err
+	}
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return ManagedSkillMarker{}, err
+	}
+	if marker.ManagedBy != "acpa" || marker.Asset != "skill" || strings.TrimSpace(marker.Name) == "" || strings.TrimSpace(marker.Provider) == "" {
+		return ManagedSkillMarker{}, fmt.Errorf("invalid ACPA managed skill marker")
+	}
+	return marker, nil
+}
+
+func ListSkills(workspacePath string, provider model.HarnessProvider) ([]model.SkillInfo, error) {
+	root := ManagedSkillRoot(workspacePath, provider)
+	if root == "" {
+		return nil, fmt.Errorf("unsupported harness provider %q", provider)
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []model.SkillInfo
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sourcePath := filepath.Join(root, entry.Name())
+		if _, err := os.Stat(filepath.Join(sourcePath, "SKILL.md")); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
-		out = append(out, skills...)
+		out = append(out, readNativeSkillInfo(sourcePath, provider))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Layer == out[j].Layer {
@@ -77,75 +162,84 @@ func ListSkills(acpaHome, configspacePath string, provider model.HarnessProvider
 	return out, nil
 }
 
-func writeBuiltInSkills(targetSkillsDir string) error {
-	if err := os.MkdirAll(targetSkillsDir, 0o755); err != nil {
+func materializeBuiltInSkill(root string, provider model.HarnessProvider, skill builtInSkill) error {
+	target := filepath.Join(root, skill.Name)
+	if info, err := os.Stat(target); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("unowned ACPA managed skill collision at %s: path is not a directory", target)
+		}
+		marker, err := ReadManagedSkillMarker(target)
+		if err != nil {
+			return fmt.Errorf("unowned ACPA managed skill collision at %s: %w", target, err)
+		}
+		if marker.Name != skill.Name || marker.Provider != string(provider) {
+			return fmt.Errorf("unowned ACPA managed skill collision at %s: marker belongs to %s/%s", target, marker.Provider, marker.Name)
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	for _, skill := range builtInSkills {
-		target := filepath.Join(targetSkillsDir, skill.OverlayName)
-		if err := os.MkdirAll(target, 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte(skill.Content), 0o644); err != nil {
-			return err
-		}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
 	}
-	return nil
-}
-
-func builtInSkillInfos(configspacePath string, provider model.HarnessProvider) []model.SkillInfo {
-	out := make([]model.SkillInfo, 0, len(builtInSkills))
-	for _, skill := range builtInSkills {
-		metadata := parseSkillFrontMatter(skill.Content)
-		name := metadata["name"]
-		if name == "" {
-			name = skill.OverlayName
-		}
-		out = append(out, model.SkillInfo{
-			Name:        name,
-			Description: metadata["description"],
-			Layer:       "built-in",
-			OverlayPath: skillOverlayPath(configspacePath, provider, skill.OverlayName),
-		})
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte(skill.Content), 0o644); err != nil {
+		return err
 	}
-	return out
-}
-
-func listSkillsInSource(layer, dir, prefix, configspacePath string, provider model.HarnessProvider) ([]model.SkillInfo, error) {
-	info, err := os.Stat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+	marker := ManagedSkillMarker{
+		ManagedBy:   "acpa",
+		Provider:    string(provider),
+		Asset:       "skill",
+		Name:        skill.Name,
+		Version:     managedAssetVersion,
+		ContentHash: contentHash(skill.Content),
 	}
-	if err != nil || !info.IsDir() {
-		return nil, err
-	}
-	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil {
-		return []model.SkillInfo{readSkillInfo(layer, dir, prefix, configspacePath, provider)}, nil
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	entries, err := os.ReadDir(dir)
+	data, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var out []model.SkillInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sourcePath := filepath.Join(dir, entry.Name())
-		if _, err := os.Stat(filepath.Join(sourcePath, "SKILL.md")); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return nil, err
-		}
-		out = append(out, readSkillInfo(layer, sourcePath, prefix+"-"+safeName(entry.Name()), configspacePath, provider))
-	}
-	return out, nil
+	return os.WriteFile(filepath.Join(target, ".acpa-managed.json"), append(data, '\n'), 0o644)
 }
 
-func readSkillInfo(layer, sourcePath, overlayName, configspacePath string, provider model.HarnessProvider) model.SkillInfo {
+func ensureManagedSkillGitignore(workspacePath string) error {
+	if strings.TrimSpace(workspacePath) == "" {
+		return fmt.Errorf("workspace path is required")
+	}
+	path := filepath.Join(workspacePath, ".gitignore")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		data = nil
+	} else if err != nil {
+		return err
+	}
+	text := string(data)
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	has := map[string]bool{}
+	for _, line := range lines {
+		has[strings.TrimSpace(line)] = true
+	}
+	rules := []string{".agents/skills/acpa-*/", ".claude/skills/acpa-*/"}
+	var changed bool
+	for _, rule := range rules {
+		if !has[rule] {
+			if text != "" && !strings.HasSuffix(text, "\n") {
+				text += "\n"
+			}
+			text += rule + "\n"
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+func readNativeSkillInfo(sourcePath string, provider model.HarnessProvider) model.SkillInfo {
 	name := filepath.Base(sourcePath)
 	description := ""
 	data, err := os.ReadFile(filepath.Join(sourcePath, "SKILL.md"))
@@ -156,12 +250,15 @@ func readSkillInfo(layer, sourcePath, overlayName, configspacePath string, provi
 		}
 		description = metadata["description"]
 	}
+	layer := "workspace"
+	if marker, err := ReadManagedSkillMarker(sourcePath); err == nil && marker.Provider == string(provider) {
+		layer = "built-in"
+	}
 	return model.SkillInfo{
 		Name:        name,
 		Description: description,
 		Layer:       layer,
 		SourcePath:  sourcePath,
-		OverlayPath: skillOverlayPath(configspacePath, provider, overlayName),
 	}
 }
 
@@ -185,13 +282,7 @@ func parseSkillFrontMatter(text string) map[string]string {
 	return out
 }
 
-func skillOverlayPath(configspacePath string, provider model.HarnessProvider, name string) string {
-	switch provider {
-	case model.ProviderCodex:
-		return filepath.Join(configspacePath, "harness", "codex-home", "skills", name)
-	case model.ProviderClaude:
-		return filepath.Join(configspacePath, "harness", "claude-plugin", "skills", name)
-	default:
-		return ""
-	}
+func contentHash(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

@@ -24,6 +24,7 @@ type Registry struct {
 type RegistryEntry struct {
 	ID              string `yaml:"id" json:"id"`
 	Name            string `yaml:"name" json:"name"`
+	HomePath        string `yaml:"home_path,omitempty" json:"home_path,omitempty"`
 	ConfigspacePath string `yaml:"configspace_path" json:"configspace_path"`
 	WorkspacePath   string `yaml:"workspace_path" json:"workspace_path"`
 	CreatedAt       string `yaml:"created_at" json:"created_at"`
@@ -33,6 +34,7 @@ type AssistantState struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
 	Harness         string    `json:"harness,omitempty"`
+	HomePath        string    `json:"home_path,omitempty"`
 	ConfigspacePath string    `json:"configspace_path"`
 	WorkspacePath   string    `json:"workspace_path"`
 	ChannelCount    int       `json:"channel_count"`
@@ -58,6 +60,7 @@ type Status struct {
 type CreateAssistantRequest struct {
 	ID              string                 `json:"id"`
 	Name            string                 `json:"name"`
+	HomePath        string                 `json:"home_path"`
 	RootPath        string                 `json:"root_path"`
 	WorkspacePath   string                 `json:"workspace_path"`
 	ConfigspacePath string                 `json:"configspace_path"`

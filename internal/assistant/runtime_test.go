@@ -858,18 +858,19 @@ func TestRuntimeSkillsCommandsReportSources(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	acpaHome := filepath.Join(root, "acpa")
-	configspace := filepath.Join(root, "config")
-	writeTestSkill(t, filepath.Join(acpaHome, "global", "skills", "global-one"), "global-one", "Global skill")
-	writeTestSkill(t, filepath.Join(configspace, "skills", "assistant-one"), "assistant-one", "Assistant skill")
+	workspace := filepath.Join(root, "workspace")
+	writeTestSkill(t, filepath.Join(workspace, ".agents", "skills", "workspace-one"), "workspace-one", "Workspace skill")
+	writeTestSkill(t, filepath.Join(workspace, ".agents", "skills", "acpa-cron"), "acpa-cron", "Built-in cron")
+	if err := os.WriteFile(filepath.Join(workspace, ".agents", "skills", "acpa-cron", ".acpa-managed.json"), []byte(`{"managed_by":"acpa","provider":"codex","asset":"skill","name":"acpa-cron","version":"test","content_hash":"sha256:test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	s := &fakeSender{}
 	rt := assistant.NewRuntime(assistant.RuntimeConfig{
-		AssistantID:     "alpha",
-		Provider:        model.ProviderCodex,
-		Store:           db,
-		Sender:          s,
-		ACPAHome:        acpaHome,
-		ConfigspacePath: configspace,
+		AssistantID:   "alpha",
+		Provider:      model.ProviderCodex,
+		Store:         db,
+		Sender:        s,
+		WorkspacePath: workspace,
 		Policy: model.PolicySet{
 			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
 			Users: map[string]model.Policy{
@@ -889,7 +890,7 @@ func TestRuntimeSkillsCommandsReportSources(t *testing.T) {
 	if err := rt.HandleInbound(ctx, user); err != nil {
 		t.Fatalf("skills: %v", err)
 	}
-	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "global-one: Global skill") || !strings.Contains(s.messages[0].Text, "assistant-one: Assistant skill") || strings.Contains(s.messages[0].Text, "source:") {
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "acpa-cron: Built-in cron") || !strings.Contains(s.messages[0].Text, "workspace-one: Workspace skill") || strings.Contains(s.messages[0].Text, "source:") {
 		t.Fatalf("skills output should list names and descriptions only, got %#v", s.messages)
 	}
 	verboseDenied := user
@@ -908,7 +909,7 @@ func TestRuntimeSkillsCommandsReportSources(t *testing.T) {
 	if err := rt.HandleInbound(ctx, owner); err != nil {
 		t.Fatalf("skills verbose: %v", err)
 	}
-	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, "global:") || !strings.Contains(s.messages[2].Text, "assistant:") || !strings.Contains(s.messages[2].Text, filepath.Join(configspace, "skills", "assistant-one")) || !strings.Contains(s.messages[2].Text, filepath.Join(configspace, "harness", "codex-home", "skills")) {
+	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, "built-in:") || !strings.Contains(s.messages[2].Text, "workspace:") || !strings.Contains(s.messages[2].Text, filepath.Join(workspace, ".agents", "skills", "workspace-one")) || strings.Contains(s.messages[2].Text, "overlay:") {
 		t.Fatalf("verbose skills should include source layers and paths, got %#v", s.messages)
 	}
 }

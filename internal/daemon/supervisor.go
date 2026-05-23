@@ -61,11 +61,12 @@ func (s *Supervisor) List(ctx context.Context) ([]AssistantState, error) {
 	}
 	states := make([]AssistantState, 0, len(reg.Assistants))
 	for _, entry := range reg.Assistants {
-		state := AssistantState{ID: entry.ID, Name: entry.Name, ConfigspacePath: entry.ConfigspacePath, WorkspacePath: entry.WorkspacePath}
+		state := AssistantState{ID: entry.ID, Name: entry.Name, HomePath: entry.HomePath, ConfigspacePath: entry.ConfigspacePath, WorkspacePath: entry.WorkspacePath}
 		if cfg, err := configspace.LoadAssistant(entry.ConfigspacePath); err == nil {
 			state.ID = cfg.ID
 			state.Name = cfg.Name
 			state.Harness = string(cfg.Harness.Provider)
+			state.HomePath = cfg.HomePath
 			state.WorkspacePath = cfg.WorkspacePath
 			state.ConfigspacePath = cfg.ConfigspacePath
 			state.ChannelCount = channelCount(cfg.ConfigspacePath)
@@ -240,6 +241,7 @@ func stateFromConfig(cfg model.AssistantConfig) AssistantState {
 		ID:              cfg.ID,
 		Name:            cfg.Name,
 		Harness:         string(cfg.Harness.Provider),
+		HomePath:        cfg.HomePath,
 		ConfigspacePath: cfg.ConfigspacePath,
 		WorkspacePath:   cfg.WorkspacePath,
 		ChannelCount:    channelCount(cfg.ConfigspacePath),

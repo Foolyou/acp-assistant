@@ -35,7 +35,7 @@ func Collect(ctx context.Context, opts Options) Report {
 	}
 	configDir := strings.TrimSpace(opts.ConfigspacePath)
 	if configDir == "" {
-		report.AddCheck(Check{ID: "configspace.resolve", Title: "Configspace resolution", Severity: SeverityFail, Message: "configspace path was not provided", Recommendation: "Pass an assistant id, --root, or --configspace."})
+		report.AddCheck(Check{ID: "configspace.resolve", Title: "Configspace resolution", Severity: SeverityFail, Message: "configspace path was not provided", Recommendation: "Pass an assistant id, --home, or --configspace."})
 		return report
 	}
 	configDir = absPath(configDir)
@@ -49,9 +49,11 @@ func Collect(ctx context.Context, opts Options) Report {
 	}
 	report.AssistantID = cfg.ID
 	report.AssistantName = cfg.Name
+	report.AssistantHome = cfg.HomePath
 	report.WorkspacePath = cfg.WorkspacePath
 	report.EventDBPath = cfg.EventDBPath
 	report.AddCheck(Check{ID: "assistant.config", Title: "Assistant config", Severity: SeverityPass, Message: "loaded assistant config", Details: map[string]any{"path": filepath.Join(configDir, configspace.AssistantFile)}})
+	report.AddCheck(layoutCheck(cfg))
 	report.AddCheck(registryCheck(opts.HomePath, cfg))
 	report.AddCheck(statPathCheck("workspace.exists", "Workspace", cfg.WorkspacePath, true))
 	report.AddCheck(statPathCheck("eventdb.parent", "Event DB directory", filepath.Dir(cfg.EventDBPath), true))
@@ -121,6 +123,7 @@ func registryCheck(home string, cfg model.AssistantConfig) Check {
 	var reg struct {
 		Assistants []struct {
 			ID              string `yaml:"id"`
+			HomePath        string `yaml:"home_path"`
 			ConfigspacePath string `yaml:"configspace_path"`
 		} `yaml:"assistants"`
 	}
@@ -129,7 +132,7 @@ func registryCheck(home string, cfg model.AssistantConfig) Check {
 	}
 	for _, entry := range reg.Assistants {
 		if entry.ID == cfg.ID {
-			details := map[string]any{"path": path, "registered_configspace": entry.ConfigspacePath}
+			details := map[string]any{"path": path, "registered_home": entry.HomePath, "registered_configspace": entry.ConfigspacePath}
 			if entry.ConfigspacePath != "" && absPath(entry.ConfigspacePath) != absPath(cfg.ConfigspacePath) {
 				return Check{ID: "registry.entry", Title: "Assistant registry", Severity: SeverityWarn, Message: "assistant registry points to a different configspace", Details: details, Recommendation: "Update the registry entry or use --configspace explicitly."}
 			}
@@ -140,6 +143,19 @@ func registryCheck(home string, cfg model.AssistantConfig) Check {
 		return Check{ID: "registry.entry", Title: "Assistant registry", Severity: SeverityWarn, Message: "assistant id was not found in global registry", Details: map[string]any{"path": path, "assistant_id": cfg.ID}, Recommendation: "Use --configspace explicitly or recreate/register the assistant entry."}
 	}
 	return Check{ID: "registry.entry", Title: "Assistant registry", Severity: SeverityWarn, Message: "assistant id was not found in global registry", Details: map[string]any{"path": path, "assistant_id": cfg.ID}, Recommendation: "Use --configspace explicitly or recreate/register the assistant entry."}
+}
+
+func layoutCheck(cfg model.AssistantConfig) Check {
+	if cfg.HomePath == "" {
+		return Check{ID: "layout.kind", Title: "Assistant layout", Severity: SeverityWarn, Message: "assistant uses legacy independent workspace/configspace paths", Details: map[string]any{"workspace": cfg.WorkspacePath, "configspace": cfg.ConfigspacePath}, Recommendation: "Migrate or recreate the assistant with an assistant home using .acpa and workspace."}
+	}
+	expectedConfig := configspace.AssistantConfigspacePath(cfg.HomePath)
+	expectedWorkspace := configspace.AssistantWorkspacePath(cfg.HomePath)
+	details := map[string]any{"home": cfg.HomePath, "expected_configspace": expectedConfig, "expected_workspace": expectedWorkspace}
+	if absPath(expectedConfig) != absPath(cfg.ConfigspacePath) || absPath(expectedWorkspace) != absPath(cfg.WorkspacePath) {
+		return Check{ID: "layout.kind", Title: "Assistant layout", Severity: SeverityWarn, Message: "assistant home is present but derived paths do not match", Details: details, Recommendation: "Repair assistant.yaml or migrate the assistant layout."}
+	}
+	return Check{ID: "layout.kind", Title: "Assistant layout", Severity: SeverityPass, Message: "assistant home layout is derived", Details: details}
 }
 
 func processCheck(configDir string, report *Report) *ProcessSnapshot {
@@ -250,16 +266,20 @@ func addHarnessChecks(report *Report, cfg model.AssistantConfig, home string) {
 	sort.Strings(envKeys)
 	report.Harness = &HarnessSnapshot{Provider: profile.Provider, PermissionMode: profile.PermissionMode, Command: profile.Command, Args: profile.Args, ProcessDir: profile.ProcessDir, EnvKeys: envKeys}
 	report.AddCheck(Check{ID: "harness.profile", Title: "Harness launch profile", Severity: SeverityPass, Message: "manual launch profile resolved", Details: map[string]any{"process_dir": profile.ProcessDir, "env_keys": envKeys}})
-	for _, path := range []string{
-		filepath.Join(home, "global", configspace.InstructionsFile),
-		filepath.Join(cfg.ConfigspacePath, configspace.InstructionsFile),
-	} {
+	instructionPaths, err := harnesspkg.ManagedInstructionPaths(cfg.ConfigspacePath, cfg.Harness.Provider)
+	if err != nil {
+		report.AddCheck(Check{ID: "harness.instructions", Title: "Harness instructions", Severity: SeverityFail, Message: err.Error(), Recommendation: "Fix harness provider configuration."})
+	} else {
+		report.AddCheck(Check{ID: "harness.instructions.inject", Title: "Harness instruction injection", Severity: SeverityPass, Message: instructionInjectionMessage(cfg.Harness.Provider)})
+	}
+	for _, path := range instructionPaths {
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			report.AddCheck(Check{ID: "harness.instructions", Title: "Harness instructions", Severity: SeverityWarn, Message: "instruction source is missing", Details: map[string]any{"path": path}, Recommendation: "Run assistant create or ensure assistant instruction sources exist."})
 		} else if err != nil {
 			report.AddCheck(Check{ID: "harness.instructions", Title: "Harness instructions", Severity: SeverityWarn, Message: err.Error(), Details: map[string]any{"path": path}, Recommendation: "Check instruction source permissions."})
 		}
 	}
+	addManagedSkillChecks(report, cfg)
 	commandPath, err := exec.LookPath(profile.Command)
 	if err != nil {
 		report.AddCheck(Check{ID: "harness.command", Title: "Harness command", Severity: SeverityFail, Message: err.Error(), Details: map[string]any{"command": profile.Command}, Recommendation: "Install the harness command or update assistant.yaml harness.command."})
@@ -267,9 +287,7 @@ func addHarnessChecks(report *Report, cfg model.AssistantConfig, home string) {
 	}
 	report.Harness.CommandPath = commandPath
 	report.AddCheck(Check{ID: "harness.command", Title: "Harness command", Severity: SeverityPass, Message: "command found", Details: map[string]any{"command": profile.Command, "path": commandPath}})
-	if profile.ProcessDir != "" {
-		report.AddCheck(cwdCheck(profile.ProcessDir))
-	}
+	report.AddCheck(cwdCheck(cfg.WorkspacePath))
 }
 
 func cwdCheck(path string) Check {
@@ -287,19 +305,41 @@ func cwdCheck(path string) Check {
 }
 
 func harnessOptions(cfg model.AssistantConfig, home string) harnesspkg.ProfileOptions {
-	options := harnesspkg.ProfileOptions{Command: cfg.Harness.Command, Args: cfg.Harness.Args}
-	processDir := filepath.Join(home, "runtime-cwd", safeName(cfg.ID), safeName(string(cfg.Harness.Provider)))
-	options.ProcessDir = processDir
+	_ = home
+	managed, _ := harnesspkg.RenderManagedInstructions(cfg.ConfigspacePath, cfg.Harness.Provider)
+	options := harnesspkg.ProfileOptions{Command: cfg.Harness.Command, Args: cfg.Harness.Args, ProcessDir: cfg.WorkspacePath, ManagedInstructions: managed}
 	switch cfg.Harness.Provider {
-	case model.ProviderCodex:
-		options.Env = map[string]string{"CODEX_HOME": filepath.Join(cfg.ConfigspacePath, "harness", "codex-home")}
 	case model.ProviderClaude:
-		options.ClaudePluginDir = filepath.Join(cfg.ConfigspacePath, "harness", "claude-plugin")
 		if claudePath, err := exec.LookPath("claude"); err == nil && strings.TrimSpace(claudePath) != "" {
 			options.Env = map[string]string{"CLAUDE_CODE_EXECUTABLE": claudePath}
 		}
 	}
 	return options
+}
+
+func instructionInjectionMessage(provider model.HarnessProvider) string {
+	if provider == model.ProviderCodex {
+		return "managed instructions are injected through Codex developer_instructions"
+	}
+	if provider == model.ProviderClaude {
+		return "managed instructions are injected through ACP session metadata _meta.systemPrompt"
+	}
+	return "managed instruction injection is provider-specific"
+}
+
+func addManagedSkillChecks(report *Report, cfg model.AssistantConfig) {
+	for _, dir := range harnesspkg.ExpectedManagedSkillDirs(cfg.WorkspacePath, cfg.Harness.Provider) {
+		marker, err := harnesspkg.ReadManagedSkillMarker(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			report.AddCheck(Check{ID: "harness.skills", Title: "Managed skill assets", Severity: SeverityWarn, Message: "managed skill is not materialized", Details: map[string]any{"path": dir}, Recommendation: "Start the assistant or run a repair command to materialize built-in skills."})
+			continue
+		}
+		if err != nil {
+			report.AddCheck(Check{ID: "harness.skills", Title: "Managed skill assets", Severity: SeverityFail, Message: err.Error(), Details: map[string]any{"path": dir}, Recommendation: "Remove or rename conflicting acpa-* skill directories, then repair managed assets."})
+			continue
+		}
+		report.AddCheck(Check{ID: "harness.skills", Title: "Managed skill assets", Severity: SeverityPass, Message: "managed skill marker is valid", Details: map[string]any{"path": dir, "provider": marker.Provider, "name": marker.Name, "version": marker.Version}})
+	}
 }
 
 func collectLogSnippets(configDir string, limit int) []LogSnippet {

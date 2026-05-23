@@ -42,6 +42,7 @@ type RuntimeConfig struct {
 	ChannelOptions  map[string]map[string]string
 	ACPAHome        string
 	ConfigspacePath string
+	WorkspacePath   string
 }
 
 type Runtime struct {
@@ -790,7 +791,7 @@ func (r *Runtime) commandHelp(key model.SessionBindingKey) string {
 		"/session - list your sessions",
 		"/session <id> - switch to one of your sessions",
 		"/clear - start a fresh session",
-		"/skills - list effective skills",
+		"/skills - list workspace-native skills",
 		"/approve <id> - approve a pending action",
 		"/reject <id> - reject a pending action",
 	}
@@ -1102,12 +1103,12 @@ func (r *Runtime) commandSkills(args []string, key model.SessionBindingKey) (com
 	if len(args) > 0 && !verbose {
 		return commandResult{}, commandError{Category: commandErrorFailure, Message: "/skills supports only the optional verbose argument"}
 	}
-	skills, err := harnesspkg.ListSkills(r.cfg.ACPAHome, r.cfg.ConfigspacePath, r.cfg.Provider)
+	skills, err := harnesspkg.ListSkills(r.cfg.WorkspacePath, r.cfg.Provider)
 	if err != nil {
 		return commandResult{}, err
 	}
 	if len(skills) == 0 {
-		return commandResult{Text: "No ACPA-managed skills are configured."}, nil
+		return commandResult{Text: "No workspace-native skills are visible for this provider."}, nil
 	}
 	if !verbose {
 		lines := []string{"Effective skills:"}

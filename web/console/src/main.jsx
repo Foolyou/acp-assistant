@@ -272,7 +272,7 @@ function AssistantCard({ assistant, active, busy, onSelect, onAction, onAutostar
       <dl className="facts">
         <div><dt>Provider</dt><dd>{assistant.harness || "configured"}</dd></div>
         <div><dt>Channels</dt><dd className={!assistant.channel_count ? "missing" : ""}>{channelLabel(assistant.channel_count)}</dd></div>
-        <div><dt>Workspace</dt><dd title={assistant.workspace_path}>{compactPath(assistant.workspace_path)}</dd></div>
+        <div><dt>Home</dt><dd title={assistant.home_path || assistant.workspace_path}>{compactPath(assistant.home_path || assistant.workspace_path)}</dd></div>
       </dl>
       <label className="toggle-row" onClick={(event) => event.stopPropagation()}>
         <input type="checkbox" checked={!!assistant.autostart} onChange={(event) => onAutostart(event.target.checked)} />
@@ -301,6 +301,7 @@ function AssistantDetail({ assistant, onAction }) {
         <div><dt>Status</dt><dd>{assistant.running ? `running pid ${assistant.pid}` : "stopped"}</dd></div>
         <div><dt>Channels</dt><dd className={!assistant.channel_count ? "missing" : ""}>{channelLabel(assistant.channel_count)}</dd></div>
         <div><dt>Autostart</dt><dd>{assistant.autostart ? "enabled" : "disabled"}</dd></div>
+        <div><dt>Home</dt><dd>{assistant.home_path || "Legacy layout"}</dd></div>
         <div><dt>Workspace</dt><dd>{assistant.workspace_path}</dd></div>
         <div><dt>Configspace</dt><dd>{assistant.configspace_path}</dd></div>
       </dl>
@@ -375,7 +376,7 @@ function CreateAssistantForm({ onDone, onClose, onError }) {
         body: JSON.stringify({
           name: form.get("name"),
           id: form.get("id"),
-          root_path: form.get("root_path"),
+          home_path: form.get("home_path"),
           workspace_path: form.get("workspace_path"),
           configspace_path: form.get("configspace_path"),
           harness: form.get("harness"),
@@ -399,7 +400,7 @@ function CreateAssistantForm({ onDone, onClose, onError }) {
       {advanced && (
         <div className="advanced">
           <label>ID<input name="id" placeholder="derived from name" /></label>
-          <label>Root<input name="root_path" placeholder="default ACPA assistant root" /></label>
+          <label>Home<input name="home_path" placeholder="default assistant home" /></label>
           <label>Workspace<input name="workspace_path" placeholder="optional" /></label>
           <label>Configspace<input name="configspace_path" placeholder="optional" /></label>
         </div>

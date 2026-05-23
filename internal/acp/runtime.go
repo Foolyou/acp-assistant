@@ -38,15 +38,16 @@ type Capabilities struct {
 }
 
 type Config struct {
-	Command      string
-	Args         []string
-	Env          map[string]string
-	Workspace    string
-	ProcessDir   string
-	PromptPrefix string
-	EffortLevel  string
-	OnEvent      func(Event)
-	OnRequest    func(Request) bool
+	Command             string
+	Args                []string
+	Env                 map[string]string
+	Workspace           string
+	ProcessDir          string
+	PromptPrefix        string
+	ManagedInstructions string
+	EffortLevel         string
+	OnEvent             func(Event)
+	OnRequest           func(Request) bool
 	// OnPromptText receives text that must be surfaced before the prompt completes,
 	// such as agent text emitted before a permission request pauses execution.
 	OnPromptText func(sessionID, text string)
@@ -134,15 +135,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if processDir != "" {
 		cmd.Dir = processDir
 	}
-	if len(r.cfg.Env) > 0 {
+	if processDir != "" || len(r.cfg.Env) > 0 {
 		cmd.Env = os.Environ()
-		if processDir != "" {
-			cmd.Env = appendWithoutEnvKey(cmd.Env, "PWD")
-			cmd.Env = append(cmd.Env, "PWD="+processDir)
-		}
-		for key, value := range r.cfg.Env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
+	}
+	if processDir != "" {
+		cmd.Env = appendWithoutEnvKey(cmd.Env, "PWD")
+		cmd.Env = append(cmd.Env, "PWD="+processDir)
+	}
+	for key, value := range r.cfg.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -206,10 +207,11 @@ func (r *Runtime) NewSession(ctx context.Context) (string, error) {
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := r.request(ctx, "session/new", map[string]any{
+	params := r.withManagedInstructions(map[string]any{
 		"cwd":        r.cfg.Workspace,
 		"mcpServers": []any{},
-	}, &result); err != nil {
+	})
+	if err := r.request(ctx, "session/new", params, &result); err != nil {
 		return "", err
 	}
 	if err := r.applyConfiguredEffort(ctx, result.SessionID); err != nil {
@@ -260,11 +262,12 @@ func (r *Runtime) LoadSession(ctx context.Context, sessionID string) (string, er
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := r.request(ctx, "session/load", map[string]any{
+	params := r.withManagedInstructions(map[string]any{
 		"sessionId":  sessionID,
 		"cwd":        r.cfg.Workspace,
 		"mcpServers": []any{},
-	}, &result); err != nil {
+	})
+	if err := r.request(ctx, "session/load", params, &result); err != nil {
 		return "", err
 	}
 	if result.SessionID == "" {
@@ -299,9 +302,7 @@ func (r *Runtime) PromptWithOptions(ctx context.Context, sessionID, text string,
 
 	var result map[string]any
 	prompt := []map[string]any{}
-	if !opts.SuppressPrefix && r.shouldSendPromptPrefix(sessionID) {
-		prompt = append(prompt, map[string]any{"type": "text", "text": r.cfg.PromptPrefix})
-	}
+	_ = opts
 	prompt = append(prompt, map[string]any{"type": "text", "text": text})
 	if err := r.request(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
@@ -323,6 +324,21 @@ func (r *Runtime) shouldSendPromptPrefix(sessionID string) bool {
 	}
 	r.promptPrefixSent[sessionID] = true
 	return true
+}
+
+func (r *Runtime) withManagedInstructions(params map[string]any) map[string]any {
+	instructions := strings.TrimSpace(r.cfg.ManagedInstructions)
+	if instructions == "" {
+		return params
+	}
+	params["_meta"] = map[string]any{
+		"systemPrompt": map[string]any{
+			"type":   "preset",
+			"preset": "claude_code",
+			"append": instructions,
+		},
+	}
+	return params
 }
 
 func (r *Runtime) Cancel(ctx context.Context, sessionID string) error {

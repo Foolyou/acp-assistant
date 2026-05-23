@@ -22,6 +22,7 @@ const (
 type Report struct {
 	AssistantID     string              `json:"assistant_id,omitempty"`
 	AssistantName   string              `json:"assistant_name,omitempty"`
+	AssistantHome   string              `json:"assistant_home,omitempty"`
 	ConfigspacePath string              `json:"configspace_path,omitempty"`
 	WorkspacePath   string              `json:"workspace_path,omitempty"`
 	EventDBPath     string              `json:"event_db_path,omitempty"`

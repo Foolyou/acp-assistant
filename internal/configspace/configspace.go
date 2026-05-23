@@ -15,13 +15,19 @@ import (
 )
 
 const (
-	AssistantFile    = "assistant.yaml"
-	InstructionsFile = "instructions.md"
-	PoliciesFile     = "policies.yaml"
-	EventsDBFile     = "events.db"
+	AssistantFile            = "assistant.yaml"
+	AssistantConfigspaceName = ".acpa"
+	AssistantWorkspaceName   = "workspace"
+	InstructionsDir          = "instructions"
+	CommonInstructionsFile   = "common.md"
+	CodexInstructionsFile    = "codex.md"
+	ClaudeInstructionsFile   = "claude.md"
+	PoliciesFile             = "policies.yaml"
+	EventsDBFile             = "events.db"
 )
 
 func Initialize(ctx context.Context, cfg model.AssistantConfig) error {
+	cfg = ApplyAssistantHome(cfg)
 	if err := validateAssistant(cfg); err != nil {
 		return err
 	}
@@ -85,21 +91,108 @@ func InitializeGlobal(home string) error {
 	if strings.TrimSpace(home) == "" {
 		return fmt.Errorf("ACPA home path is required")
 	}
-	globalDir := filepath.Join(home, "global")
-	if err := os.MkdirAll(filepath.Join(globalDir, "skills"), 0o755); err != nil {
-		return err
-	}
-	return ensureFile(filepath.Join(globalDir, InstructionsFile), "# Global ACPA Instructions\n\n")
+	return os.MkdirAll(home, 0o755)
 }
 
 func EnsureAssistantSources(cfg model.AssistantConfig) error {
-	if err := os.MkdirAll(filepath.Join(cfg.ConfigspacePath, "skills"), 0o755); err != nil {
+	cfg = ApplyAssistantHome(cfg)
+	if err := EnsureManagedInstructions(cfg); err != nil {
 		return err
 	}
-	return ensureFile(filepath.Join(cfg.ConfigspacePath, InstructionsFile), assistantInstructionsSkeleton(cfg))
+	if strings.TrimSpace(cfg.WorkspacePath) == "" {
+		return nil
+	}
+	return EnsureWorkspaceInstructions(cfg.WorkspacePath)
+}
+
+func AssistantConfigspacePath(home string) string {
+	return filepath.Join(home, AssistantConfigspaceName)
+}
+
+func AssistantWorkspacePath(home string) string {
+	return filepath.Join(home, AssistantWorkspaceName)
+}
+
+func ApplyAssistantHome(cfg model.AssistantConfig) model.AssistantConfig {
+	if strings.TrimSpace(cfg.HomePath) != "" {
+		if strings.TrimSpace(cfg.ConfigspacePath) == "" {
+			cfg.ConfigspacePath = AssistantConfigspacePath(cfg.HomePath)
+		}
+		if strings.TrimSpace(cfg.WorkspacePath) == "" {
+			cfg.WorkspacePath = AssistantWorkspacePath(cfg.HomePath)
+		}
+		return cfg
+	}
+	if home, ok := InferAssistantHome(cfg.ConfigspacePath, cfg.WorkspacePath); ok {
+		cfg.HomePath = home
+	}
+	return cfg
+}
+
+func InferAssistantHome(configspacePath, workspacePath string) (string, bool) {
+	configspacePath = strings.TrimSpace(configspacePath)
+	workspacePath = strings.TrimSpace(workspacePath)
+	if configspacePath == "" || workspacePath == "" {
+		return "", false
+	}
+	home := filepath.Dir(configspacePath)
+	if filepath.Base(configspacePath) != AssistantConfigspaceName {
+		return "", false
+	}
+	if cleanPath(workspacePath) != cleanPath(AssistantWorkspacePath(home)) {
+		return "", false
+	}
+	return home, true
+}
+
+func ResolveConfigspaceFromHomeOrRoot(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	homeConfig := AssistantConfigspacePath(path)
+	if _, err := os.Stat(filepath.Join(homeConfig, AssistantFile)); err == nil {
+		return homeConfig
+	}
+	return filepath.Join(path, "config")
+}
+
+func EnsureManagedInstructions(cfg model.AssistantConfig) error {
+	if strings.TrimSpace(cfg.ConfigspacePath) == "" {
+		return fmt.Errorf("configspace path is required")
+	}
+	dir := filepath.Join(cfg.ConfigspacePath, InstructionsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	files := map[string]string{
+		CommonInstructionsFile: commonInstructionsSkeleton(),
+		CodexInstructionsFile:  providerInstructionsSkeleton(model.ProviderCodex),
+		ClaudeInstructionsFile: providerInstructionsSkeleton(model.ProviderClaude),
+	}
+	for name, content := range files {
+		if err := ensureFile(filepath.Join(dir, name), content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func EnsureWorkspaceInstructions(workspacePath string) error {
+	if strings.TrimSpace(workspacePath) == "" {
+		return fmt.Errorf("workspace path is required")
+	}
+	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
+		return err
+	}
+	agentsPath := filepath.Join(workspacePath, "AGENTS.md")
+	if err := ensureFile(agentsPath, "# AGENTS.md\n\nShared project guidance for this assistant workspace belongs here.\n"); err != nil {
+		return err
+	}
+	return ensureClaudeBridge(filepath.Join(workspacePath, "CLAUDE.md"))
 }
 
 func SaveAssistant(configDir string, cfg model.AssistantConfig) error {
+	cfg = ApplyAssistantHome(cfg)
 	if cfg.EventDBPath == "" {
 		cfg.EventDBPath = filepath.Join(configDir, EventsDBFile)
 	}
@@ -126,6 +219,10 @@ func LoadAssistant(configDir string) (model.AssistantConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return model.AssistantConfig{}, err
 	}
+	if cfg.ConfigspacePath == "" {
+		cfg.ConfigspacePath = configDir
+	}
+	cfg = ApplyAssistantHome(cfg)
 	if _, ok := raw["autostart"]; !ok {
 		cfg.Autostart = true
 	}
@@ -335,13 +432,47 @@ func memorySkeleton(rel string) string {
 	return "# " + strings.Title(strings.ReplaceAll(name, "-", " ")) + "\n\n"
 }
 
-func assistantInstructionsSkeleton(cfg model.AssistantConfig) string {
-	name := strings.TrimSpace(cfg.Name)
-	if name == "" {
-		name = strings.TrimSpace(cfg.ID)
+func commonInstructionsSkeleton() string {
+	return "# ACPA Managed Instructions\n\n" +
+		"Shared project guidance belongs in the workspace `AGENTS.md` file. When you need to add or update durable shared guidance for this assistant, update `AGENTS.md` instead of provider-specific files.\n"
+}
+
+func providerInstructionsSkeleton(provider model.HarnessProvider) string {
+	switch provider {
+	case model.ProviderClaude:
+		return "# Claude Managed Instructions\n\n" +
+			"Use `CLAUDE.md` only as a bridge to `AGENTS.md`; do not store shared project guidance directly in `CLAUDE.md`.\n"
+	case model.ProviderCodex:
+		return "# Codex Managed Instructions\n\n" +
+			"Load workspace guidance from `AGENTS.md` and keep shared updates there.\n"
+	default:
+		return "# Provider Managed Instructions\n\n"
 	}
-	if name == "" {
-		name = "Assistant"
+}
+
+func ensureClaudeBridge(path string) error {
+	const bridge = "# CLAUDE.md\n\nRead and follow `AGENTS.md` for shared project guidance. Keep durable shared guidance in `AGENTS.md`, not this bridge file.\n"
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte(bridge), 0o644)
 	}
-	return fmt.Sprintf("# %s Instructions\n\n", name)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(string(data), "AGENTS.md") {
+		return nil
+	}
+	content := strings.TrimRight(string(data), "\r\n") + "\n\n" + strings.TrimRight(bridge, "\n") + "\n"
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func cleanPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return abs
 }

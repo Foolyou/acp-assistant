@@ -104,6 +104,7 @@ type HarnessBinding struct {
 type AssistantConfig struct {
 	ID              string         `yaml:"id" json:"id"`
 	Name            string         `yaml:"name" json:"name"`
+	HomePath        string         `yaml:"home_path,omitempty" json:"home_path,omitempty"`
 	WorkspacePath   string         `yaml:"workspace_path" json:"workspace_path"`
 	ConfigspacePath string         `yaml:"configspace_path" json:"configspace_path"`
 	Harness         HarnessBinding `yaml:"harness" json:"harness"`

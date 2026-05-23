@@ -200,17 +200,22 @@ func (s *Server) createAssistant(ctx context.Context, req CreateAssistantRequest
 	if name == "" {
 		name = id
 	}
-	root := strings.TrimSpace(req.RootPath)
-	if root == "" {
-		root = filepath.Join(s.opts.Home, "assistants", id)
+	assistantHome := strings.TrimSpace(req.HomePath)
+	if assistantHome == "" {
+		assistantHome = strings.TrimSpace(req.RootPath)
 	}
+	if assistantHome == "" {
+		assistantHome = filepath.Join(s.opts.Home, "assistants", id)
+	}
+	explicitWorkspace := strings.TrimSpace(req.WorkspacePath) != ""
+	explicitConfigspace := strings.TrimSpace(req.ConfigspacePath) != ""
 	workspacePath := req.WorkspacePath
 	if workspacePath == "" {
-		workspacePath = filepath.Join(root, "workspace")
+		workspacePath = configspace.AssistantWorkspacePath(assistantHome)
 	}
 	configDir := req.ConfigspacePath
 	if configDir == "" {
-		configDir = filepath.Join(root, "config")
+		configDir = configspace.AssistantConfigspacePath(assistantHome)
 	}
 	provider := req.Harness
 	if provider == "" {
@@ -241,6 +246,12 @@ func (s *Server) createAssistant(ctx context.Context, req CreateAssistantRequest
 		Memory:          req.Memory,
 		EventDBPath:     filepath.Join(absPath(configDir), configspace.EventsDBFile),
 		Autostart:       autostart,
+	}
+	homeAbs := absPath(assistantHome)
+	if !explicitWorkspace && !explicitConfigspace {
+		cfg.HomePath = homeAbs
+	} else if home, ok := configspace.InferAssistantHome(cfg.ConfigspacePath, cfg.WorkspacePath); ok && absPath(home) == homeAbs {
+		cfg.HomePath = homeAbs
 	}
 	if cfg.Memory.Files == nil {
 		cfg.Memory = model.DefaultMemoryConfig()

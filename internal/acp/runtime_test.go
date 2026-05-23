@@ -188,20 +188,45 @@ func TestRuntimeLoadSessionIncludesMCPServers(t *testing.T) {
 	}
 }
 
-func TestRuntimePromptPrependsConfiguredPrefix(t *testing.T) {
+func TestRuntimeNewSessionIncludesManagedInstructionsMetadata(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()
 		return
 	}
 
 	t.Setenv("ACPA_ACP_HELPER", "1")
-	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "prompt_prefix")
-	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimePromptPrependsConfiguredPrefix")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "managed_instructions_meta")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeNewSessionIncludesManagedInstructionsMetadata")
 	rt := acp.NewRuntime(acp.Config{
-		Command:      cmd.Path,
-		Args:         cmd.Args[1:],
-		Workspace:    t.TempDir(),
-		PromptPrefix: "fixed instructions",
+		Command:             cmd.Path,
+		Args:                cmd.Args[1:],
+		Workspace:           t.TempDir(),
+		ManagedInstructions: "managed session instructions",
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+	if _, err := rt.NewSession(ctx); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+}
+
+func TestRuntimePromptDoesNotSendManagedInstructionsAsPromptPrefix(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "no_prompt_prefix")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimePromptDoesNotSendManagedInstructionsAsPromptPrefix")
+	rt := acp.NewRuntime(acp.Config{
+		Command:             cmd.Path,
+		Args:                cmd.Args[1:],
+		Workspace:           t.TempDir(),
+		ManagedInstructions: "managed instructions",
 	})
 	ctx := context.Background()
 	if err := rt.Start(ctx); err != nil {
@@ -209,34 +234,6 @@ func TestRuntimePromptPrependsConfiguredPrefix(t *testing.T) {
 	}
 	defer rt.Stop()
 	if _, err := rt.Prompt(ctx, "session-1", "hello"); err != nil {
-		t.Fatalf("prompt: %v", err)
-	}
-	if _, err := rt.Prompt(ctx, "session-1", "again"); err != nil {
-		t.Fatalf("second prompt should not repeat prefix: %v", err)
-	}
-}
-
-func TestRuntimePromptCanSuppressConfiguredPrefix(t *testing.T) {
-	if os.Getenv("ACPA_ACP_HELPER") == "1" {
-		runACPHelperProcess()
-		return
-	}
-
-	t.Setenv("ACPA_ACP_HELPER", "1")
-	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "prompt_prefix_suppressed")
-	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimePromptCanSuppressConfiguredPrefix")
-	rt := acp.NewRuntime(acp.Config{
-		Command:      cmd.Path,
-		Args:         cmd.Args[1:],
-		Workspace:    t.TempDir(),
-		PromptPrefix: "fixed instructions",
-	})
-	ctx := context.Background()
-	if err := rt.Start(ctx); err != nil {
-		t.Fatalf("start runtime: %v", err)
-	}
-	defer rt.Stop()
-	if _, err := rt.PromptWithOptions(ctx, "session-1", "cron payload", acp.PromptOptions{SuppressPrefix: true}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 }
@@ -338,7 +335,6 @@ func TestParseInitializeCapabilities(t *testing.T) {
 func runACPHelperProcess() {
 	decoder := json.NewDecoder(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
-	promptCount := 0
 	for {
 		var req struct {
 			ID     int             `json:"id"`
@@ -390,6 +386,26 @@ func runACPHelperProcess() {
 					},
 				})
 				continue
+			}
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "managed_instructions_meta" {
+				var payload struct {
+					Meta struct {
+						SystemPrompt struct {
+							Type   string `json:"type"`
+							Preset string `json:"preset"`
+							Append string `json:"append"`
+						} `json:"systemPrompt"`
+					} `json:"_meta"`
+				}
+				_ = json.Unmarshal(req.Params, &payload)
+				if payload.Meta.SystemPrompt.Type != "preset" || payload.Meta.SystemPrompt.Preset != "claude_code" || payload.Meta.SystemPrompt.Append != "managed session instructions" {
+					_ = encoder.Encode(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      req.ID,
+						"error":   map[string]any{"code": -32602, "message": "missing managed system prompt metadata"},
+					})
+					continue
+				}
 			}
 			_ = encoder.Encode(map[string]any{
 				"jsonrpc": "2.0",
@@ -448,8 +464,7 @@ func runACPHelperProcess() {
 				"result":  map[string]any{"sessionId": "loaded-" + payload.SessionID},
 			})
 		case "session/prompt":
-			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix" || os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix_suppressed" {
-				promptCount++
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "no_prompt_prefix" {
 				var payload struct {
 					Prompt []struct {
 						Type string `json:"type"`
@@ -457,28 +472,11 @@ func runACPHelperProcess() {
 					} `json:"prompt"`
 				}
 				_ = json.Unmarshal(req.Params, &payload)
-				if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "prompt_prefix_suppressed" {
-					if len(payload.Prompt) != 1 || payload.Prompt[0].Text != "cron payload" {
-						_ = encoder.Encode(map[string]any{
-							"jsonrpc": "2.0",
-							"id":      req.ID,
-							"error":   map[string]any{"code": -32602, "message": "prompt prefix was not suppressed"},
-						})
-						continue
-					}
-				} else if promptCount == 1 && (len(payload.Prompt) != 2 || payload.Prompt[0].Text != "fixed instructions" || payload.Prompt[1].Text != "hello") {
+				if len(payload.Prompt) != 1 || payload.Prompt[0].Text != "hello" {
 					_ = encoder.Encode(map[string]any{
 						"jsonrpc": "2.0",
 						"id":      req.ID,
-						"error":   map[string]any{"code": -32602, "message": "missing prompt prefix"},
-					})
-					continue
-				}
-				if promptCount == 2 && (len(payload.Prompt) != 1 || payload.Prompt[0].Text != "again") {
-					_ = encoder.Encode(map[string]any{
-						"jsonrpc": "2.0",
-						"id":      req.ID,
-						"error":   map[string]any{"code": -32602, "message": "prompt prefix repeated"},
+						"error":   map[string]any{"code": -32602, "message": "managed instructions leaked into prompt"},
 					})
 					continue
 				}

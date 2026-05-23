@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Foolyou/acp-assistant/internal/configspace"
 	"github.com/Foolyou/acp-assistant/internal/model"
 	"gopkg.in/yaml.v3"
 )
@@ -101,6 +102,7 @@ func RegisterAssistant(home string, cfg model.AssistantConfig) error {
 	entry := RegistryEntry{
 		ID:              cfg.ID,
 		Name:            cfg.Name,
+		HomePath:        cfg.HomePath,
 		ConfigspacePath: cfg.ConfigspacePath,
 		WorkspacePath:   cfg.WorkspacePath,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
@@ -126,6 +128,12 @@ func ResolveConfigspace(home string, idOrPath string) (string, error) {
 	}
 	if _, err := os.Stat(filepath.Join(value, "assistant.yaml")); err == nil {
 		return absPath(value), nil
+	}
+	if _, err := os.Stat(filepath.Join(value, configspace.AssistantConfigspaceName, configspace.AssistantFile)); err == nil {
+		return absPath(filepath.Join(value, configspace.AssistantConfigspaceName)), nil
+	}
+	if _, err := os.Stat(filepath.Join(value, "config", configspace.AssistantFile)); err == nil {
+		return absPath(filepath.Join(value, "config")), nil
 	}
 	reg, err := LoadRegistry(home)
 	if err != nil {

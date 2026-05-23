@@ -53,10 +53,11 @@ func TestAssistantCreateInspectAndChannelOnboarding(t *testing.T) {
 		t.Fatalf("memory skeleton missing: %v", err)
 	}
 	for _, path := range []string{
-		filepath.Join(root, "home", "global", "instructions.md"),
-		filepath.Join(root, "home", "global", "skills"),
-		filepath.Join(configDir, "instructions.md"),
-		filepath.Join(configDir, "skills"),
+		filepath.Join(configDir, "instructions", "common.md"),
+		filepath.Join(configDir, "instructions", "codex.md"),
+		filepath.Join(configDir, "instructions", "claude.md"),
+		filepath.Join(workspace, "AGENTS.md"),
+		filepath.Join(workspace, "CLAUDE.md"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected instruction/skill source %s to exist: %v", path, err)
@@ -95,14 +96,14 @@ func TestChannelAddAcceptsRootPath(t *testing.T) {
 	t.Setenv("FEISHU_APP_SECRET", "app-secret")
 
 	projectRoot := filepath.Join(root, "project")
-	if err := run(ctx, []string{"assistant", "create", "--name", "Root Channel", "--root", projectRoot, "--harness", "codex"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+	if err := run(ctx, []string{"assistant", "create", "--name", "Root Channel", "--home", projectRoot, "--harness", "codex"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("assistant create: %v", err)
 	}
 	var out bytes.Buffer
-	if err := run(ctx, []string{"channel", "add", "feishu", "--root", projectRoot, "--id", "feishu-main", "--account-id", "main", "--app-id-env", "FEISHU_APP_ID", "--app-secret-env", "FEISHU_APP_SECRET"}, strings.NewReader(""), &out, &out); err != nil {
-		t.Fatalf("channel add with root: %v", err)
+	if err := run(ctx, []string{"channel", "add", "feishu", "--home", projectRoot, "--id", "feishu-main", "--account-id", "main", "--app-id-env", "FEISHU_APP_ID", "--app-secret-env", "FEISHU_APP_SECRET"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("channel add with home: %v", err)
 	}
-	channels, err := configspace.LoadChannels(filepath.Join(projectRoot, "config"))
+	channels, err := configspace.LoadChannels(filepath.Join(projectRoot, ".acpa"))
 	if err != nil {
 		t.Fatalf("load channels: %v", err)
 	}
@@ -111,21 +112,21 @@ func TestChannelAddAcceptsRootPath(t *testing.T) {
 	}
 }
 
-func TestAssistantCreateUsesRootLayoutAndDefaultHomeLayout(t *testing.T) {
+func TestAssistantCreateUsesAssistantHomeLayoutByDefault(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("ACPA_HOME", filepath.Join(root, "home"))
 
 	projectRoot := filepath.Join(root, "project")
 	var out bytes.Buffer
-	if err := run(ctx, []string{"assistant", "create", "--name", "Rooted", "--root", projectRoot, "--harness", "codex"}, strings.NewReader(""), &out, &out); err != nil {
-		t.Fatalf("assistant create with root: %v", err)
+	if err := run(ctx, []string{"assistant", "create", "--name", "Rooted", "--home", projectRoot, "--harness", "codex"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatalf("assistant create with home: %v", err)
 	}
-	cfg, err := configspace.LoadAssistant(filepath.Join(projectRoot, "config"))
+	cfg, err := configspace.LoadAssistant(filepath.Join(projectRoot, ".acpa"))
 	if err != nil {
 		t.Fatalf("load rooted assistant: %v", err)
 	}
-	if cfg.ConfigspacePath != filepath.Join(projectRoot, "config") || cfg.WorkspacePath != filepath.Join(projectRoot, "workspace") {
+	if cfg.HomePath != projectRoot || cfg.ConfigspacePath != filepath.Join(projectRoot, ".acpa") || cfg.WorkspacePath != filepath.Join(projectRoot, "workspace") {
 		t.Fatalf("unexpected rooted layout: %#v", cfg)
 	}
 
@@ -134,12 +135,21 @@ func TestAssistantCreateUsesRootLayoutAndDefaultHomeLayout(t *testing.T) {
 		t.Fatalf("assistant create with defaults: %v", err)
 	}
 	defaultRoot := filepath.Join(root, "home", "assistants", "defaulted")
-	cfg, err = configspace.LoadAssistant(filepath.Join(defaultRoot, "config"))
+	cfg, err = configspace.LoadAssistant(filepath.Join(defaultRoot, ".acpa"))
 	if err != nil {
 		t.Fatalf("load default assistant: %v", err)
 	}
-	if cfg.ConfigspacePath != filepath.Join(defaultRoot, "config") || cfg.WorkspacePath != filepath.Join(defaultRoot, "workspace") {
+	if cfg.HomePath != defaultRoot || cfg.ConfigspacePath != filepath.Join(defaultRoot, ".acpa") || cfg.WorkspacePath != filepath.Join(defaultRoot, "workspace") {
 		t.Fatalf("unexpected default layout: %#v", cfg)
+	}
+	reg, err := loadRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range reg.Assistants {
+		if entry.ID == "defaulted" && entry.HomePath != defaultRoot {
+			t.Fatalf("registry should record assistant home, got %#v", entry)
+		}
 	}
 }
 

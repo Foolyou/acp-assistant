@@ -260,7 +260,8 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 	fs.SetOutput(io.Discard)
 	name := fs.String("name", "", "assistant name")
 	id := fs.String("id", "", "assistant id")
-	rootPath := fs.String("root", "", "assistant root path containing workspace and config")
+	homePath := fs.String("home", "", "assistant home path containing .acpa and workspace")
+	rootPath := fs.String("root", "", "legacy alias for assistant home")
 	workspacePath := fs.String("workspace", "", "workspace path")
 	configDir := fs.String("configspace", "", "configspace path")
 	providerRaw := fs.String("harness", "codex", "harness provider: codex or claude")
@@ -280,15 +281,20 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 	if *name == "" {
 		*name = assistantID
 	}
-	root := strings.TrimSpace(*rootPath)
-	if root == "" {
-		root = filepath.Join(defaultHome(), "assistants", assistantID)
+	assistantHome := strings.TrimSpace(*homePath)
+	if assistantHome == "" {
+		assistantHome = strings.TrimSpace(*rootPath)
 	}
+	if assistantHome == "" {
+		assistantHome = filepath.Join(defaultHome(), "assistants", assistantID)
+	}
+	explicitWorkspace := strings.TrimSpace(*workspacePath) != ""
+	explicitConfigspace := strings.TrimSpace(*configDir) != ""
 	if *workspacePath == "" {
-		*workspacePath = filepath.Join(root, "workspace")
+		*workspacePath = configspace.AssistantWorkspacePath(assistantHome)
 	}
 	if *configDir == "" {
-		*configDir = filepath.Join(root, "config")
+		*configDir = configspace.AssistantConfigspacePath(assistantHome)
 	}
 	provider := model.HarnessProvider(*providerRaw)
 	defaultCommand, defaultArgs, err := harnesspkg.DefaultCommand(provider)
@@ -312,6 +318,12 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 		EventDBPath:     filepath.Join(absPath(*configDir), configspace.EventsDBFile),
 		Autostart:       true,
 	}
+	homeAbs := absPath(assistantHome)
+	if !explicitWorkspace && !explicitConfigspace {
+		cfg.HomePath = homeAbs
+	} else if home, ok := configspace.InferAssistantHome(cfg.ConfigspacePath, cfg.WorkspacePath); ok && absPath(home) == homeAbs {
+		cfg.HomePath = homeAbs
+	}
 	if err := configspace.InitializeGlobal(defaultHome()); err != nil {
 		return err
 	}
@@ -320,6 +332,10 @@ func assistantCreate(ctx context.Context, args []string, stdout io.Writer) error
 	}
 	if err := registerAssistant(cfg); err != nil {
 		return err
+	}
+	if cfg.HomePath != "" {
+		fmt.Fprintf(stdout, "created assistant %s\nhome: %s\nconfigspace: %s\nworkspace: %s\n", cfg.ID, cfg.HomePath, cfg.ConfigspacePath, cfg.WorkspacePath)
+		return nil
 	}
 	fmt.Fprintf(stdout, "created assistant %s\nconfigspace: %s\nworkspace: %s\n", cfg.ID, cfg.ConfigspacePath, cfg.WorkspacePath)
 	return nil
@@ -331,9 +347,9 @@ func assistantList(args []string, stdout io.Writer) error {
 		return err
 	}
 	sort.Slice(registry.Assistants, func(i, j int) bool { return registry.Assistants[i].ID < registry.Assistants[j].ID })
-	fmt.Fprintln(stdout, "ID\tNAME\tCONFIGSPACE\tWORKSPACE")
+	fmt.Fprintln(stdout, "ID\tNAME\tHOME\tCONFIGSPACE\tWORKSPACE")
 	for _, item := range registry.Assistants {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.ID, item.Name, item.ConfigspacePath, item.WorkspacePath)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", item.ID, item.Name, item.HomePath, item.ConfigspacePath, item.WorkspacePath)
 	}
 	return nil
 }
@@ -363,8 +379,8 @@ func assistantInspect(ctx context.Context, args []string, stdout io.Writer) erro
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "id: %s\nname: %s\nharness: %s\nworkspace: %s\nconfigspace: %s\nchannels: %d\nactive_sessions: %d\npending_permissions: %d\n",
-		cfg.ID, cfg.Name, cfg.Harness.Provider, cfg.WorkspacePath, cfg.ConfigspacePath, len(channels), status.ActiveSessions, status.PendingPermissions)
+	fmt.Fprintf(stdout, "id: %s\nname: %s\nharness: %s\nhome: %s\nworkspace: %s\nconfigspace: %s\nchannels: %d\nactive_sessions: %d\npending_permissions: %d\n",
+		cfg.ID, cfg.Name, cfg.Harness.Provider, cfg.HomePath, cfg.WorkspacePath, cfg.ConfigspacePath, len(channels), status.ActiveSessions, status.PendingPermissions)
 	return nil
 }
 
@@ -434,7 +450,7 @@ func assistantServe(ctx context.Context, args []string, stdout, stderr io.Writer
 		key := string(channel.Platform) + "/" + channel.AccountID
 		channelOptions[key] = channel.Options
 	}
-	rt := assistant.NewRuntime(assistant.RuntimeConfig{AssistantID: cfg.ID, Provider: cfg.Harness.Provider, Store: db, Harness: h, Sender: sender, Policy: policies, Memory: mem, ChannelOptions: channelOptions, ACPAHome: defaultHome(), ConfigspacePath: cfg.ConfigspacePath})
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{AssistantID: cfg.ID, Provider: cfg.Harness.Provider, Store: db, Harness: h, Sender: sender, Policy: policies, Memory: mem, ChannelOptions: channelOptions, ACPAHome: defaultHome(), ConfigspacePath: cfg.ConfigspacePath, WorkspacePath: cfg.WorkspacePath})
 	h.onPermission = func(ctx context.Context, localSessionID, acpRequestID string, options []string) (model.PendingPermission, error) {
 		return rt.RecordPermissionRequest(ctx, assistant.PermissionRequest{LocalSessionID: localSessionID, ACPRequestID: acpRequestID, Options: options, TimeoutResolution: "reject"})
 	}
@@ -614,7 +630,8 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 	}
 	fs := flag.NewFlagSet("channel add "+platformRaw, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	rootPath := fs.String("root", "", "assistant root path containing workspace and config")
+	homePath := fs.String("home", "", "assistant home path")
+	rootPath := fs.String("root", "", "legacy assistant root path")
 	configDir := fs.String("configspace", "", "configspace path")
 	id := fs.String("id", "", "channel id")
 	accountID := fs.String("account-id", "main", "account id")
@@ -634,11 +651,14 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *configDir == "" && *homePath != "" {
+		*configDir = configspace.AssistantConfigspacePath(*homePath)
+	}
 	if *configDir == "" && *rootPath != "" {
-		*configDir = filepath.Join(*rootPath, "config")
+		*configDir = configspace.ResolveConfigspaceFromHomeOrRoot(*rootPath)
 	}
 	if *configDir == "" {
-		return fmt.Errorf("--root or --configspace is required")
+		return fmt.Errorf("--home, --root, or --configspace is required")
 	}
 	reader := bufio.NewReader(stdin)
 	if *id == "" {
@@ -799,7 +819,7 @@ func runDoctor(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	resolved, err := resolveConfigspaceFromFlags(opts.configspace, opts.root, opts.positional)
+	resolved, err := resolveConfigspaceFromFlags(opts.configspace, opts.home, opts.root, opts.positional)
 	if err != nil {
 		return err
 	}
@@ -815,7 +835,7 @@ func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	resolved, err := resolveConfigspaceFromFlags(opts.configspace, opts.root, opts.positional)
+	resolved, err := resolveConfigspaceFromFlags(opts.configspace, opts.home, opts.root, opts.positional)
 	if err != nil {
 		return err
 	}
@@ -843,8 +863,8 @@ func runStatus(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, status := range snapshot.Connectors {
 		statusByKey[string(status.Platform)+"/"+status.AccountID] = status
 	}
-	fmt.Fprintf(stdout, "id: %s\nname: %s\nharness: %s\nworkspace: %s\nconfigspace: %s\nchannels: %d\nactive_sessions: %d\npending_permissions: %d\nrecent_errors: %d\n",
-		cfg.ID, cfg.Name, cfg.Harness.Provider, cfg.WorkspacePath, cfg.ConfigspacePath, len(channels), snapshot.ActiveSessions, snapshot.PendingPermissions, len(snapshot.RecentErrors))
+	fmt.Fprintf(stdout, "id: %s\nname: %s\nharness: %s\nhome: %s\nworkspace: %s\nconfigspace: %s\nchannels: %d\nactive_sessions: %d\npending_permissions: %d\nrecent_errors: %d\n",
+		cfg.ID, cfg.Name, cfg.Harness.Provider, cfg.HomePath, cfg.WorkspacePath, cfg.ConfigspacePath, len(channels), snapshot.ActiveSessions, snapshot.PendingPermissions, len(snapshot.RecentErrors))
 	if len(channels) > 0 {
 		fmt.Fprintln(stdout, "connectors:")
 		for _, channel := range channels {
@@ -868,7 +888,7 @@ func runLogs(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	configDir, err := resolveConfigspaceFromFlags(opts.configspace, opts.root, opts.positional)
+	configDir, err := resolveConfigspaceFromFlags(opts.configspace, opts.home, opts.root, opts.positional)
 	if err != nil {
 		return err
 	}
@@ -1050,12 +1070,13 @@ func (h *runtimeHarness) launchProfile(mode model.PermissionMode) (harnesspkg.La
 		return harnesspkg.LaunchProfile{}, err
 	}
 	return harnesspkg.ResolveLaunchProfile(h.cfg.Harness.Provider, mode, harnesspkg.ProfileOptions{
-		Command:         h.cfg.Harness.Command,
-		Args:            h.cfg.Harness.Args,
-		Env:             overlay.Env,
-		ClaudePluginDir: overlay.ClaudePluginDir,
-		PromptPrefix:    overlay.PromptPrefix,
-		ProcessDir:      overlay.ProcessDir,
+		Command:             h.cfg.Harness.Command,
+		Args:                h.cfg.Harness.Args,
+		Env:                 overlay.Env,
+		ClaudePluginDir:     overlay.ClaudePluginDir,
+		PromptPrefix:        overlay.PromptPrefix,
+		ProcessDir:          overlay.ProcessDir,
+		ManagedInstructions: overlay.ManagedInstructions,
 	})
 }
 
@@ -1071,16 +1092,17 @@ func (h *runtimeHarness) runtime(ctx context.Context, profile harnesspkg.LaunchP
 	runtime := h.runtimes[profile.Key]
 	if runtime == nil {
 		runtime = acp.NewRuntime(acp.Config{
-			Command:      profile.Command,
-			Args:         profile.Args,
-			Env:          profile.Env,
-			Workspace:    h.cfg.WorkspacePath,
-			ProcessDir:   profile.ProcessDir,
-			PromptPrefix: profile.PromptPrefix,
-			EffortLevel:  profile.EffortLevel,
-			OnEvent:      h.handleACPEvent,
-			OnRequest:    h.handleACPRequest,
-			OnPromptText: h.handleACPPromptText,
+			Command:             profile.Command,
+			Args:                profile.Args,
+			Env:                 profile.Env,
+			Workspace:           h.cfg.WorkspacePath,
+			ProcessDir:          profile.ProcessDir,
+			PromptPrefix:        profile.PromptPrefix,
+			ManagedInstructions: profile.ManagedInstructions,
+			EffortLevel:         profile.EffortLevel,
+			OnEvent:             h.handleACPEvent,
+			OnRequest:           h.handleACPRequest,
+			OnPromptText:        h.handleACPPromptText,
 		})
 		h.runtimes[profile.Key] = runtime
 	}
@@ -1238,6 +1260,7 @@ type registry struct {
 type registryEntry struct {
 	ID              string `yaml:"id"`
 	Name            string `yaml:"name"`
+	HomePath        string `yaml:"home_path,omitempty"`
 	ConfigspacePath string `yaml:"configspace_path"`
 	WorkspacePath   string `yaml:"workspace_path"`
 	CreatedAt       string `yaml:"created_at"`
@@ -1248,7 +1271,7 @@ func registerAssistant(cfg model.AssistantConfig) error {
 	if err != nil {
 		return err
 	}
-	entry := registryEntry{ID: cfg.ID, Name: cfg.Name, ConfigspacePath: cfg.ConfigspacePath, WorkspacePath: cfg.WorkspacePath, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	entry := registryEntry{ID: cfg.ID, Name: cfg.Name, HomePath: cfg.HomePath, ConfigspacePath: cfg.ConfigspacePath, WorkspacePath: cfg.WorkspacePath, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
 	replaced := false
 	for i := range reg.Assistants {
 		if reg.Assistants[i].ID == cfg.ID {
@@ -1314,11 +1337,17 @@ func resolveConfigspace(args []string) (string, error) {
 		if strings.HasPrefix(arg, "--configspace=") {
 			return absPath(strings.TrimPrefix(arg, "--configspace=")), nil
 		}
+		if arg == "--home" && i+1 < len(args) {
+			return absPath(configspace.AssistantConfigspacePath(args[i+1])), nil
+		}
+		if strings.HasPrefix(arg, "--home=") {
+			return absPath(configspace.AssistantConfigspacePath(strings.TrimPrefix(arg, "--home="))), nil
+		}
 		if arg == "--root" && i+1 < len(args) {
-			return absPath(filepath.Join(args[i+1], "config")), nil
+			return absPath(configspace.ResolveConfigspaceFromHomeOrRoot(args[i+1])), nil
 		}
 		if strings.HasPrefix(arg, "--root=") {
-			return absPath(filepath.Join(strings.TrimPrefix(arg, "--root="), "config")), nil
+			return absPath(configspace.ResolveConfigspaceFromHomeOrRoot(strings.TrimPrefix(arg, "--root="))), nil
 		}
 	}
 	for _, arg := range args {
@@ -1337,22 +1366,32 @@ func resolveConfigspace(args []string) (string, error) {
 		if _, err := os.Stat(filepath.Join(arg, configspace.AssistantFile)); err == nil {
 			return absPath(arg), nil
 		}
+		if _, err := os.Stat(filepath.Join(arg, configspace.AssistantConfigspaceName, configspace.AssistantFile)); err == nil {
+			return absPath(filepath.Join(arg, configspace.AssistantConfigspaceName)), nil
+		}
+		if _, err := os.Stat(filepath.Join(arg, "config", configspace.AssistantFile)); err == nil {
+			return absPath(filepath.Join(arg, "config")), nil
+		}
 	}
-	return "", fmt.Errorf("--configspace or assistant id is required")
+	return "", fmt.Errorf("--home, --configspace, or assistant id is required")
 }
 
-func resolveConfigspaceFromFlags(configDir, rootPath string, positional []string) (string, error) {
+func resolveConfigspaceFromFlags(configDir, homePath, rootPath string, positional []string) (string, error) {
 	if strings.TrimSpace(configDir) != "" {
 		return absPath(configDir), nil
 	}
+	if strings.TrimSpace(homePath) != "" {
+		return absPath(configspace.AssistantConfigspacePath(homePath)), nil
+	}
 	if strings.TrimSpace(rootPath) != "" {
-		return absPath(filepath.Join(rootPath, "config")), nil
+		return absPath(configspace.ResolveConfigspaceFromHomeOrRoot(rootPath)), nil
 	}
 	return resolveConfigspace(positional)
 }
 
 type topLevelOptions struct {
 	configspace string
+	home        string
 	root        string
 	verbose     bool
 	jsonOutput  bool
@@ -1374,6 +1413,14 @@ func parseTopLevelOptions(args []string, allowDoctorFlags bool) (topLevelOptions
 			opts.configspace = args[i]
 		case strings.HasPrefix(arg, "--configspace="):
 			opts.configspace = strings.TrimPrefix(arg, "--configspace=")
+		case arg == "--home":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("--home requires a path")
+			}
+			opts.home = args[i]
+		case strings.HasPrefix(arg, "--home="):
+			opts.home = strings.TrimPrefix(arg, "--home=")
 		case arg == "--root":
 			i++
 			if i >= len(args) {
@@ -1451,21 +1498,21 @@ func printOnboarding(platform model.Platform, setupURL string, stdout io.Writer)
 
 func printUsage(stdout io.Writer) {
 	fmt.Fprintln(stdout, `Usage:
-  acpa assistant create --name NAME [--root PATH] [--harness codex|claude]
+  acpa assistant create --name NAME [--home PATH] [--harness codex|claude]
   acpa assistant list
-  acpa assistant inspect <assistant-id|--root PATH|--configspace PATH>
-  acpa assistant start <assistant-id|--root PATH|--configspace PATH> [--foreground]
-  acpa assistant stop <assistant-id|--root PATH|--configspace PATH>
-  acpa assistant restart <assistant-id|--root PATH|--configspace PATH>
-  acpa assistant status <assistant-id|--root PATH|--configspace PATH>
-  acpa assistant autostart enable|disable <assistant-id|--root PATH|--configspace PATH>
+  acpa assistant inspect <assistant-id|--home PATH|--configspace PATH>
+  acpa assistant start <assistant-id|--home PATH|--configspace PATH> [--foreground]
+  acpa assistant stop <assistant-id|--home PATH|--configspace PATH>
+  acpa assistant restart <assistant-id|--home PATH|--configspace PATH>
+  acpa assistant status <assistant-id|--home PATH|--configspace PATH>
+  acpa assistant autostart enable|disable <assistant-id|--home PATH|--configspace PATH>
   acpa daemon start|stop|restart|status
   acpa console
-  acpa channel add feishu|qqbot --root PATH|--configspace PATH [credential flags]
-  acpa channel status <assistant-id|--root PATH|--configspace PATH>
-  acpa doctor <assistant-id|--root PATH|--configspace PATH> [--verbose|--json]
-  acpa status <assistant-id|--root PATH|--configspace PATH>
-  acpa logs <assistant-id|--root PATH|--configspace PATH> [--lines N] [--follow]`)
+  acpa channel add feishu|qqbot --home PATH|--configspace PATH [credential flags]
+  acpa channel status <assistant-id|--home PATH|--configspace PATH>
+  acpa doctor <assistant-id|--home PATH|--configspace PATH> [--verbose|--json]
+  acpa status <assistant-id|--home PATH|--configspace PATH>
+  acpa logs <assistant-id|--home PATH|--configspace PATH> [--lines N] [--follow]`)
 }
 
 func slug(value string) string {

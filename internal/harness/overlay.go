@@ -1,56 +1,108 @@
 package harness
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/Foolyou/acp-assistant/internal/configspace"
 	"github.com/Foolyou/acp-assistant/internal/model"
 )
 
 type Overlay struct {
-	Env             map[string]string
-	ClaudePluginDir string
-	PromptPrefix    string
-	ProcessDir      string
+	Env                 map[string]string
+	ClaudePluginDir     string
+	PromptPrefix        string
+	ProcessDir          string
+	ManagedInstructions string
 }
 
 func PrepareOverlay(cfg model.AssistantConfig, acpaHome string) (Overlay, error) {
+	_ = acpaHome
+	cfg = configspace.ApplyAssistantHome(cfg)
 	if strings.TrimSpace(cfg.ConfigspacePath) == "" {
 		return Overlay{}, fmt.Errorf("configspace path is required")
 	}
-	prefix, err := combinedInstructions(acpaHome, cfg.ConfigspacePath)
+	if strings.TrimSpace(cfg.WorkspacePath) == "" {
+		return Overlay{}, fmt.Errorf("workspace path is required")
+	}
+	if err := configspace.EnsureAssistantSources(cfg); err != nil {
+		return Overlay{}, err
+	}
+	if err := MaterializeBuiltInSkills(cfg.WorkspacePath, cfg.Harness.Provider); err != nil {
+		return Overlay{}, err
+	}
+	instructions, err := RenderManagedInstructions(cfg.ConfigspacePath, cfg.Harness.Provider)
 	if err != nil {
 		return Overlay{}, err
 	}
-	switch cfg.Harness.Provider {
+	overlay := Overlay{
+		ProcessDir:          cfg.WorkspacePath,
+		ManagedInstructions: instructions,
+	}
+	if cfg.Harness.Provider == model.ProviderClaude {
+		overlay.Env = claudeOverlayEnv()
+	}
+	return overlay, nil
+}
+
+func RenderManagedInstructions(configspacePath string, provider model.HarnessProvider) (string, error) {
+	providerFile, err := providerInstructionsFile(provider)
+	if err != nil {
+		return "", err
+	}
+	sections := []string{managedInstructionPreamble(provider)}
+	for _, path := range []string{
+		filepath.Join(configspacePath, configspace.InstructionsDir, configspace.CommonInstructionsFile),
+		filepath.Join(configspacePath, configspace.InstructionsDir, providerFile),
+	} {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if text := strings.TrimSpace(string(data)); text != "" {
+			sections = append(sections, text)
+		}
+	}
+	if len(sections) == 0 {
+		return "", nil
+	}
+	return strings.Join(sections, "\n\n"), nil
+}
+
+func managedInstructionPreamble(provider model.HarnessProvider) string {
+	text := "Shared project guidance belongs in the workspace `AGENTS.md` file. When durable shared guidance should be added or changed, update `AGENTS.md`."
+	if provider == model.ProviderClaude {
+		text += " Do not write shared project guidance directly into `CLAUDE.md`; it is only a bridge to `AGENTS.md`."
+	}
+	return text
+}
+
+func ManagedInstructionPaths(configspacePath string, provider model.HarnessProvider) ([]string, error) {
+	providerFile, err := providerInstructionsFile(provider)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		filepath.Join(configspacePath, configspace.InstructionsDir, configspace.CommonInstructionsFile),
+		filepath.Join(configspacePath, configspace.InstructionsDir, providerFile),
+	}, nil
+}
+
+func providerInstructionsFile(provider model.HarnessProvider) (string, error) {
+	switch provider {
 	case model.ProviderCodex:
-		codexHome := filepath.Join(cfg.ConfigspacePath, "harness", "codex-home")
-		if err := prepareCodexOverlay(codexHome, acpaHome, cfg.ConfigspacePath); err != nil {
-			return Overlay{}, err
-		}
-		processDir, err := prepareProcessDir(acpaHome, cfg, model.ProviderCodex)
-		if err != nil {
-			return Overlay{}, err
-		}
-		return Overlay{Env: map[string]string{"CODEX_HOME": codexHome}, PromptPrefix: prefix, ProcessDir: processDir}, nil
+		return configspace.CodexInstructionsFile, nil
 	case model.ProviderClaude:
-		pluginDir := filepath.Join(cfg.ConfigspacePath, "harness", "claude-plugin")
-		if err := prepareClaudeOverlay(pluginDir, cfg, acpaHome, cfg.ConfigspacePath); err != nil {
-			return Overlay{}, err
-		}
-		processDir, err := prepareProcessDir(acpaHome, cfg, model.ProviderClaude)
-		if err != nil {
-			return Overlay{}, err
-		}
-		return Overlay{Env: claudeOverlayEnv(), ClaudePluginDir: pluginDir, PromptPrefix: prefix, ProcessDir: processDir}, nil
+		return configspace.ClaudeInstructionsFile, nil
 	default:
-		return Overlay{PromptPrefix: prefix}, nil
+		return "", fmt.Errorf("unsupported harness provider %q", provider)
 	}
 }
 
@@ -60,218 +112,6 @@ func claudeOverlayEnv() map[string]string {
 		return nil
 	}
 	return map[string]string{"CLAUDE_CODE_EXECUTABLE": path}
-}
-
-func prepareProcessDir(acpaHome string, cfg model.AssistantConfig, provider model.HarnessProvider) (string, error) {
-	processDir := filepath.Join(acpaHome, "runtime-cwd", safeName(cfg.ID), safeName(string(provider)))
-	if err := os.MkdirAll(processDir, 0o755); err != nil {
-		return "", err
-	}
-	return processDir, nil
-}
-
-func prepareCodexOverlay(codexHome, acpaHome, configspacePath string) error {
-	if err := os.MkdirAll(filepath.Join(codexHome, "skills"), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("# Generated by acpa. Do not edit.\n"), 0o644); err != nil {
-		return err
-	}
-	if err := copyCodexAuthFiles(codexHome); err != nil {
-		return err
-	}
-	if err := removeManagedSkills(filepath.Join(codexHome, "skills")); err != nil {
-		return err
-	}
-	return copyACPASkills(filepath.Join(codexHome, "skills"), acpaHome, configspacePath)
-}
-
-func prepareClaudeOverlay(pluginDir string, cfg model.AssistantConfig, acpaHome, configspacePath string) error {
-	if err := os.MkdirAll(filepath.Join(pluginDir, ".claude-plugin"), 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(pluginDir, "skills"), 0o755); err != nil {
-		return err
-	}
-	plugin := map[string]any{
-		"name":        "acpa-" + safeName(cfg.ID),
-		"version":     "0.0.0",
-		"description": "Generated ACPA assistant plugin for " + cfg.Name,
-	}
-	data, err := json.MarshalIndent(plugin, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(pluginDir, ".claude-plugin", "plugin.json"), append(data, '\n'), 0o644); err != nil {
-		return err
-	}
-	if err := removeManagedSkills(filepath.Join(pluginDir, "skills")); err != nil {
-		return err
-	}
-	return copyACPASkills(filepath.Join(pluginDir, "skills"), acpaHome, configspacePath)
-}
-
-func copyCodexAuthFiles(codexHome string) error {
-	sourceHome, err := nativeCodexHome()
-	if err != nil || sourceHome == "" {
-		return err
-	}
-	if samePath(sourceHome, codexHome) {
-		return nil
-	}
-	for _, name := range []string{"auth.json"} {
-		source := filepath.Join(sourceHome, name)
-		info, err := os.Stat(source)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(source)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(codexHome, name), data, info.Mode().Perm()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func nativeCodexHome() (string, error) {
-	if home := strings.TrimSpace(os.Getenv("CODEX_HOME")); home != "" {
-		return home, nil
-	}
-	userHome, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(userHome, ".codex"), nil
-}
-
-func samePath(a, b string) bool {
-	absA, errA := filepath.Abs(a)
-	absB, errB := filepath.Abs(b)
-	return errA == nil && errB == nil && absA == absB
-}
-
-func removeManagedSkills(targetSkillsDir string) error {
-	entries, err := os.ReadDir(targetSkillsDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasPrefix(name, "acpa-built-in") || strings.HasPrefix(name, "acpa-global") || strings.HasPrefix(name, "acpa-assistant") {
-			if err := os.RemoveAll(filepath.Join(targetSkillsDir, name)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func copyACPASkills(targetSkillsDir, acpaHome, configspacePath string) error {
-	if err := writeBuiltInSkills(targetSkillsDir); err != nil {
-		return err
-	}
-	if err := copySkillSource(filepath.Join(acpaHome, "global", "skills"), targetSkillsDir, "acpa-global"); err != nil {
-		return err
-	}
-	return copySkillSource(filepath.Join(configspacePath, "skills"), targetSkillsDir, "acpa-assistant")
-}
-
-func copySkillSource(sourceDir, targetSkillsDir, prefix string) error {
-	info, err := os.Stat(sourceDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return nil
-	}
-	if _, err := os.Stat(filepath.Join(sourceDir, "SKILL.md")); err == nil {
-		return copyDir(sourceDir, filepath.Join(targetSkillsDir, prefix))
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	entries, err := os.ReadDir(sourceDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if err := copyDir(filepath.Join(sourceDir, entry.Name()), filepath.Join(targetSkillsDir, prefix+"-"+safeName(entry.Name()))); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func copyDir(source, target string) error {
-	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return os.MkdirAll(target, 0o755)
-		}
-		dest := filepath.Join(target, rel)
-		if entry.IsDir() {
-			return os.MkdirAll(dest, 0o755)
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(dest, data, info.Mode().Perm())
-	})
-}
-
-func combinedInstructions(acpaHome, configspacePath string) (string, error) {
-	sections := []string{builtInCronProtocol}
-	for _, path := range []string{
-		filepath.Join(acpaHome, "global", "instructions.md"),
-		filepath.Join(configspacePath, "instructions.md"),
-	} {
-		data, err := os.ReadFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		text := strings.TrimSpace(string(data))
-		if text != "" {
-			sections = append(sections, text)
-		}
-	}
-	if len(sections) == 0 {
-		return "", nil
-	}
-	return strings.Join(sections, "\n\n"), nil
 }
 
 func safeName(value string) string {

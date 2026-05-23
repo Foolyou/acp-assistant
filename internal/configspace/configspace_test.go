@@ -45,8 +45,11 @@ func TestInitializeCreatesConfigspaceAndWorkspaceWithoutOverwritingMemory(t *tes
 		filepath.Join(configDir, "events.db"),
 		filepath.Join(configDir, "channels"),
 		filepath.Join(configDir, "secrets"),
-		filepath.Join(configDir, "instructions.md"),
-		filepath.Join(configDir, "skills"),
+		filepath.Join(configDir, "instructions", "common.md"),
+		filepath.Join(configDir, "instructions", "codex.md"),
+		filepath.Join(configDir, "instructions", "claude.md"),
+		filepath.Join(workspace, "AGENTS.md"),
+		filepath.Join(workspace, "CLAUDE.md"),
 		filepath.Join(workspace, "memory", "preferences.md"),
 		filepath.Join(workspace, "artifacts"),
 		filepath.Join(workspace, "inbox"),
@@ -71,40 +74,66 @@ func TestInitializeCreatesConfigspaceAndWorkspaceWithoutOverwritingMemory(t *tes
 	if loaded.ID != "alpha" || loaded.WorkspacePath != workspace || loaded.Harness.Provider != model.ProviderCodex {
 		t.Fatalf("loaded assistant mismatch: %#v", loaded)
 	}
+	if loaded.HomePath != "" {
+		t.Fatalf("legacy layout should not infer assistant home: %#v", loaded)
+	}
 }
 
-func TestInitializeGlobalCreatesInstructionAndSkillSources(t *testing.T) {
+func TestAssistantHomePathHelpersDeriveConfigspaceAndWorkspace(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "assistant")
+
+	if got := configspace.AssistantConfigspacePath(home); got != filepath.Join(home, ".acpa") {
+		t.Fatalf("unexpected configspace path: %s", got)
+	}
+	if got := configspace.AssistantWorkspacePath(home); got != filepath.Join(home, "workspace") {
+		t.Fatalf("unexpected workspace path: %s", got)
+	}
+	if cfg := configspace.ApplyAssistantHome(model.AssistantConfig{HomePath: home}); cfg.ConfigspacePath != filepath.Join(home, ".acpa") || cfg.WorkspacePath != filepath.Join(home, "workspace") {
+		t.Fatalf("assistant home was not applied: %#v", cfg)
+	}
+}
+
+func TestInitializeGlobalCreatesHomeDirectoryOnly(t *testing.T) {
 	home := t.TempDir()
 
 	if err := configspace.InitializeGlobal(home); err != nil {
 		t.Fatalf("initialize global sources: %v", err)
 	}
 
-	for _, path := range []string{
-		filepath.Join(home, "global", "instructions.md"),
-		filepath.Join(home, "global", "skills"),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected %s to exist: %v", path, err)
-		}
+	if _, err := os.Stat(home); err != nil {
+		t.Fatalf("expected %s to exist: %v", home, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "global")); !os.IsNotExist(err) {
+		t.Fatalf("global instruction/skill source should not be created, err=%v", err)
 	}
 }
 
-func TestEnsureAssistantSourcesCreatesFilesForExistingConfigspace(t *testing.T) {
-	configDir := filepath.Join(t.TempDir(), "config")
-	cfg := model.AssistantConfig{ID: "alpha", Name: "Alpha", ConfigspacePath: configDir}
+func TestEnsureAssistantSourcesCreatesManagedAndWorkspaceInstructions(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".acpa")
+	workspace := filepath.Join(root, "workspace")
+	cfg := model.AssistantConfig{ID: "alpha", Name: "Alpha", ConfigspacePath: configDir, WorkspacePath: workspace}
 
 	if err := configspace.EnsureAssistantSources(cfg); err != nil {
 		t.Fatalf("ensure assistant sources: %v", err)
 	}
 
 	for _, path := range []string{
-		filepath.Join(configDir, "instructions.md"),
-		filepath.Join(configDir, "skills"),
+		filepath.Join(configDir, "instructions", "common.md"),
+		filepath.Join(configDir, "instructions", "codex.md"),
+		filepath.Join(configDir, "instructions", "claude.md"),
+		filepath.Join(workspace, "AGENTS.md"),
+		filepath.Join(workspace, "CLAUDE.md"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected %s to exist: %v", path, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "instructions.md")); !os.IsNotExist(err) {
+		t.Fatalf("legacy instructions.md should not be created, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "skills")); !os.IsNotExist(err) {
+		t.Fatalf("legacy configspace skills directory should not be created, err=%v", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Foolyou/acp-assistant/internal/configspace"
 	"github.com/Foolyou/acp-assistant/internal/harness"
 	"github.com/Foolyou/acp-assistant/internal/model"
 )
@@ -48,25 +49,31 @@ func TestLaunchProfilesGateModesByHarnessProvider(t *testing.T) {
 	}
 }
 
-func TestLaunchProfilesApplyOverlayEnvAndPluginArgs(t *testing.T) {
+func TestLaunchProfilesApplyManagedInstructionMechanisms(t *testing.T) {
 	codex, err := harness.ResolveLaunchProfile(model.ProviderCodex, model.PermissionManual, harness.ProfileOptions{
-		Env: map[string]string{"CODEX_HOME": "/tmp/acpa-codex-home"},
+		ManagedInstructions: "managed instructions",
 	})
 	if err != nil {
 		t.Fatalf("resolve codex profile: %v", err)
 	}
-	if codex.Env["CODEX_HOME"] != "/tmp/acpa-codex-home" {
-		t.Fatalf("expected CODEX_HOME env on codex profile, got %#v", codex.Env)
+	if len(codex.Env) != 0 {
+		t.Fatalf("codex profile should not override CODEX_HOME, got %#v", codex.Env)
+	}
+	if !slices.Contains(codex.Args, `developer_instructions="managed instructions"`) {
+		t.Fatalf("expected codex developer_instructions override, got %#v", codex.Args)
 	}
 
 	claude, err := harness.ResolveLaunchProfile(model.ProviderClaude, model.PermissionManual, harness.ProfileOptions{
-		ClaudePluginDir: "/tmp/acpa-claude-plugin",
+		ManagedInstructions: "managed instructions",
 	})
 	if err != nil {
 		t.Fatalf("resolve claude profile: %v", err)
 	}
-	if !slices.Contains(claude.Args, "--plugin-dir") || !slices.Contains(claude.Args, "/tmp/acpa-claude-plugin") {
-		t.Fatalf("expected claude plugin dir args, got %#v", claude.Args)
+	if slices.Contains(claude.Args, "--plugin-dir") {
+		t.Fatalf("claude profile should not use generated plugin args, got %#v", claude.Args)
+	}
+	if claude.ManagedInstructions != "managed instructions" {
+		t.Fatalf("expected claude managed instructions on profile, got %#v", claude)
 	}
 }
 
@@ -84,73 +91,59 @@ func TestClaudeLaunchProfileAppliesReasoningEffort(t *testing.T) {
 
 func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	root := t.TempDir()
-	globalHome := filepath.Join(root, "home")
-	configDir := filepath.Join(root, "config")
-	nativeCodexHome := filepath.Join(root, "native-codex")
-	t.Setenv("CODEX_HOME", nativeCodexHome)
-	if err := os.MkdirAll(nativeCodexHome, 0o755); err != nil {
+	assistantHome := filepath.Join(root, "alpha")
+	cfg := configspace.ApplyAssistantHome(model.AssistantConfig{
+		ID:       "alpha",
+		Name:     "Alpha",
+		HomePath: assistantHome,
+		Harness:  model.HarnessBinding{Provider: model.ProviderCodex},
+	})
+	if err := configspace.EnsureAssistantSources(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(nativeCodexHome, "auth.json"), []byte(`{"token":"redacted"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.ConfigspacePath, "instructions", "common.md"), []byte("common managed instructions\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(globalHome, "global", "skills", "global-skill"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.ConfigspacePath, "instructions", "codex.md"), []byte("codex managed instructions\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(globalHome, "global", "instructions.md"), []byte("global instructions\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(globalHome, "global", "skills", "global-skill", "SKILL.md"), []byte("---\nname: global-skill\n---\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(configDir, "skills", "assistant-skill"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "instructions.md"), []byte("assistant instructions\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "skills", "assistant-skill", "SKILL.md"), []byte("---\nname: assistant-skill\n---\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.ConfigspacePath, "instructions", "claude.md"), []byte("claude managed instructions\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := model.AssistantConfig{ID: "alpha", Name: "Alpha", ConfigspacePath: configDir, Harness: model.HarnessBinding{Provider: model.ProviderCodex}}
-	overlay, err := harness.PrepareOverlay(cfg, globalHome)
+	overlay, err := harness.PrepareOverlay(cfg, root)
 	if err != nil {
 		t.Fatalf("prepare codex overlay: %v", err)
 	}
-	codexHome := filepath.Join(configDir, "harness", "codex-home")
-	if overlay.Env["CODEX_HOME"] != codexHome {
+	if len(overlay.Env) != 0 {
 		t.Fatalf("unexpected codex env: %#v", overlay.Env)
 	}
-	if overlay.ProcessDir != filepath.Join(globalHome, "runtime-cwd", "alpha", "codex") {
+	if overlay.ProcessDir != cfg.WorkspacePath {
 		t.Fatalf("unexpected codex process dir: %#v", overlay)
 	}
 	for _, path := range []string{
-		filepath.Join(codexHome, "config.toml"),
-		filepath.Join(codexHome, "auth.json"),
-		filepath.Join(codexHome, "skills", "acpa-built-in-cron", "SKILL.md"),
-		filepath.Join(codexHome, "skills", "acpa-global-global-skill", "SKILL.md"),
-		filepath.Join(codexHome, "skills", "acpa-assistant-assistant-skill", "SKILL.md"),
+		filepath.Join(cfg.WorkspacePath, ".agents", "skills", "acpa-cron", "SKILL.md"),
+		filepath.Join(cfg.WorkspacePath, ".agents", "skills", "acpa-cron", ".acpa-managed.json"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected %s to exist: %v", path, err)
 		}
 	}
-	if !strings.Contains(overlay.PromptPrefix, "global instructions") || !strings.Contains(overlay.PromptPrefix, "assistant instructions") {
-		t.Fatalf("expected combined instructions in prompt prefix, got %q", overlay.PromptPrefix)
+	if _, err := os.Stat(filepath.Join(cfg.ConfigspacePath, "harness", "codex-home")); !os.IsNotExist(err) {
+		t.Fatalf("codex overlay home should not be generated, err=%v", err)
 	}
-	if !strings.Contains(overlay.PromptPrefix, "```acpa-cron") || !strings.Contains(overlay.PromptPrefix, "Do not tell the user a reminder or schedule has been created") {
-		t.Fatalf("expected built-in cron protocol in prompt prefix, got %q", overlay.PromptPrefix)
+	if !strings.Contains(overlay.ManagedInstructions, "common managed instructions") || !strings.Contains(overlay.ManagedInstructions, "codex managed instructions") || strings.Contains(overlay.ManagedInstructions, "claude managed instructions") {
+		t.Fatalf("unexpected codex managed instructions: %q", overlay.ManagedInstructions)
 	}
-	stateFile := filepath.Join(codexHome, "state_5.sqlite")
-	if err := os.WriteFile(stateFile, []byte("keep state"), 0o600); err != nil {
+	if !strings.Contains(overlay.ManagedInstructions, "AGENTS.md") || strings.TrimSpace(overlay.PromptPrefix) != "" {
+		t.Fatalf("managed instructions should mention AGENTS.md and prompt prefix should be empty: %#v", overlay)
+	}
+	gitignore, err := os.ReadFile(filepath.Join(cfg.WorkspacePath, ".gitignore"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := harness.PrepareOverlay(cfg, globalHome); err != nil {
-		t.Fatalf("prepare codex overlay again: %v", err)
-	}
-	if content, err := os.ReadFile(stateFile); err != nil || string(content) != "keep state" {
-		t.Fatalf("codex overlay generation should preserve existing state, content=%q err=%v", string(content), err)
+	if !strings.Contains(string(gitignore), ".agents/skills/acpa-*/") || !strings.Contains(string(gitignore), ".claude/skills/acpa-*/") {
+		t.Fatalf("expected managed skill ignore rules, got %q", string(gitignore))
 	}
 
 	cfg.Harness.Provider = model.ProviderClaude
@@ -163,28 +156,52 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", claudeBinDir)
-	overlay, err = harness.PrepareOverlay(cfg, globalHome)
+	overlay, err = harness.PrepareOverlay(cfg, root)
 	if err != nil {
 		t.Fatalf("prepare claude overlay: %v", err)
 	}
-	claudePlugin := filepath.Join(configDir, "harness", "claude-plugin")
-	if overlay.ClaudePluginDir != claudePlugin {
-		t.Fatalf("unexpected claude plugin dir: %#v", overlay)
+	if overlay.ClaudePluginDir != "" {
+		t.Fatalf("claude plugin dir should not be generated: %#v", overlay)
 	}
-	if overlay.ProcessDir != filepath.Join(globalHome, "runtime-cwd", "alpha", "claude") {
+	if overlay.ProcessDir != cfg.WorkspacePath {
 		t.Fatalf("unexpected claude process dir: %#v", overlay)
 	}
 	if overlay.Env["CLAUDE_CODE_EXECUTABLE"] != claudeBin {
 		t.Fatalf("expected claude executable env, got %#v", overlay.Env)
 	}
 	for _, path := range []string{
-		filepath.Join(claudePlugin, ".claude-plugin", "plugin.json"),
-		filepath.Join(claudePlugin, "skills", "acpa-built-in-cron", "SKILL.md"),
-		filepath.Join(claudePlugin, "skills", "acpa-global-global-skill", "SKILL.md"),
-		filepath.Join(claudePlugin, "skills", "acpa-assistant-assistant-skill", "SKILL.md"),
+		filepath.Join(cfg.WorkspacePath, ".claude", "skills", "acpa-cron", "SKILL.md"),
+		filepath.Join(cfg.WorkspacePath, ".claude", "skills", "acpa-cron", ".acpa-managed.json"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected %s to exist: %v", path, err)
 		}
+	}
+	if !strings.Contains(overlay.ManagedInstructions, "common managed instructions") || !strings.Contains(overlay.ManagedInstructions, "claude managed instructions") || strings.Contains(overlay.ManagedInstructions, "codex managed instructions") {
+		t.Fatalf("unexpected claude managed instructions: %q", overlay.ManagedInstructions)
+	}
+}
+
+func TestPrepareOverlayFailsOnUnownedManagedSkillCollision(t *testing.T) {
+	root := t.TempDir()
+	cfg := configspace.ApplyAssistantHome(model.AssistantConfig{
+		ID:       "alpha",
+		Name:     "Alpha",
+		HomePath: filepath.Join(root, "alpha"),
+		Harness:  model.HarnessBinding{Provider: model.ProviderCodex},
+	})
+	if err := configspace.EnsureAssistantSources(cfg); err != nil {
+		t.Fatal(err)
+	}
+	collision := filepath.Join(cfg.WorkspacePath, ".agents", "skills", "acpa-cron")
+	if err := os.MkdirAll(collision, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(collision, "SKILL.md"), []byte("user skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := harness.PrepareOverlay(cfg, root); err == nil || !strings.Contains(err.Error(), "unowned") {
+		t.Fatalf("expected unowned collision error, got %v", err)
 	}
 }
