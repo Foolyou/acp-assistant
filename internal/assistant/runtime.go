@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -29,6 +30,10 @@ type PermissionResolver interface {
 
 type Sender interface {
 	Send(context.Context, model.OutboundMessage) error
+}
+
+type StreamSender interface {
+	StartStream(context.Context, model.OutboundMessage) (model.OutboundStream, error)
 }
 
 type RuntimeConfig struct {
@@ -87,7 +92,8 @@ type cronToolDelivery struct {
 }
 
 type cronToolPatch struct {
-	Enabled *bool `json:"enabled,omitempty"`
+	Enabled *bool   `json:"enabled,omitempty"`
+	Name    *string `json:"name,omitempty"`
 }
 
 type EnsureSessionRequest struct {
@@ -109,10 +115,24 @@ type PromptRequest struct {
 	ACPSessionID         string
 	Text                 string
 	SuppressPromptPrefix bool
+	OnEvent              func(PromptEvent)
 }
 
 type PromptResult struct {
 	FinalText string
+}
+
+type PromptEventKind string
+
+const (
+	PromptEventText     PromptEventKind = "text"
+	PromptEventBoundary PromptEventKind = "boundary"
+)
+
+type PromptEvent struct {
+	Kind   PromptEventKind
+	Text   string
+	Reason string
 }
 
 type SwitchModeRequest struct {
@@ -216,14 +236,17 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 		}
 		session.ACPSessionID = ensured.ACPSessionID
 	}
-	result, err := r.cfg.Harness.Prompt(ctx, PromptRequest{LocalSessionID: session.ID, ACPSessionID: session.ACPSessionID, Text: msg.Text})
+	stream := r.newPromptStream(msg, model.OutboundStreamOptions{Kind: model.OutboundStreamNormal})
+	result, err := r.cfg.Harness.Prompt(ctx, PromptRequest{LocalSessionID: session.ID, ACPSessionID: session.ACPSessionID, Text: msg.Text, OnEvent: stream.HandleEvent})
 	if err != nil {
+		_ = stream.Fail(ctx, err)
 		return err
 	}
 	if handled, err := r.handleHarnessCronTool(ctx, msg, result.FinalText); handled || err != nil {
 		return err
 	}
-	if r.cfg.Sender != nil && strings.TrimSpace(result.FinalText) != "" {
+	streamed := stream.Finish(ctx)
+	if r.cfg.Sender != nil && !streamed && strings.TrimSpace(result.FinalText) != "" {
 		return r.cfg.Sender.Send(ctx, model.OutboundMessage{
 			AssistantID:      msg.AssistantID,
 			Platform:         msg.Platform,
@@ -234,6 +257,131 @@ func (r *Runtime) HandleInbound(ctx context.Context, msg model.InboundMessage) e
 			CreatedAt:        time.Now().UTC(),
 		})
 	}
+	return nil
+}
+
+func (r *Runtime) newPromptStream(msg model.InboundMessage, opts model.OutboundStreamOptions) *promptStream {
+	streamSender, _ := r.cfg.Sender.(StreamSender)
+	return &promptStream{
+		sender: streamSender,
+		route: model.OutboundMessage{
+			AssistantID:      msg.AssistantID,
+			Platform:         msg.Platform,
+			AccountID:        msg.AccountID,
+			PrivateChannelID: msg.PrivateChannelID,
+			PlatformUserID:   msg.PlatformUserID,
+		},
+		opts: opts,
+	}
+}
+
+func (r *Runtime) newCronPromptStream(job model.CronJob) *promptStream {
+	streamSender, _ := r.cfg.Sender.(StreamSender)
+	return &promptStream{
+		sender: streamSender,
+		route: model.OutboundMessage{
+			AssistantID:      job.AssistantID,
+			Platform:         job.Creator.Platform,
+			AccountID:        job.Creator.AccountID,
+			PrivateChannelID: job.Creator.PrivateChannelID,
+			PlatformUserID:   job.Creator.PlatformUserID,
+		},
+		opts: model.OutboundStreamOptions{
+			Kind:      model.OutboundStreamCron,
+			CronID:    job.ID,
+			CronTitle: job.Name,
+		},
+	}
+}
+
+type promptStream struct {
+	sender     StreamSender
+	route      model.OutboundMessage
+	opts       model.OutboundStreamOptions
+	current    model.OutboundStream
+	delivered  bool
+	failed     bool
+	suppressed bool
+}
+
+func (s *promptStream) HandleEvent(event PromptEvent) {
+	switch event.Kind {
+	case PromptEventText:
+		_ = s.Append(context.Background(), event.Text)
+	case PromptEventBoundary:
+		_ = s.Boundary(context.Background())
+	}
+}
+
+func (s *promptStream) Append(ctx context.Context, text string) error {
+	if s.sender == nil || strings.TrimSpace(text) == "" || s.failed || s.suppressed {
+		return nil
+	}
+	if s.current == nil {
+		if strings.HasPrefix(strings.TrimSpace(text), "```cron") {
+			s.suppressed = true
+			return nil
+		}
+		if err := s.Start(ctx); err != nil {
+			return err
+		}
+	}
+	if err := s.current.Append(ctx, text); err != nil {
+		s.failed = true
+		return err
+	}
+	return nil
+}
+
+func (s *promptStream) Start(ctx context.Context) error {
+	if s.sender == nil || s.failed || s.suppressed || s.current != nil {
+		return nil
+	}
+	msg := s.route
+	msg.CreatedAt = time.Now().UTC()
+	msg.Stream = &model.OutboundStreamOptions{
+		Kind:      s.opts.Kind,
+		CronID:    s.opts.CronID,
+		CronTitle: s.opts.CronTitle,
+	}
+	stream, err := s.sender.StartStream(ctx, msg)
+	if err != nil {
+		s.failed = true
+		return err
+	}
+	s.current = stream
+	s.delivered = true
+	return nil
+}
+
+func (s *promptStream) Boundary(ctx context.Context) error {
+	if s.current == nil {
+		return nil
+	}
+	if err := s.current.Finish(ctx); err != nil {
+		s.failed = true
+		return err
+	}
+	s.current = nil
+	return nil
+}
+
+func (s *promptStream) Finish(ctx context.Context) bool {
+	if s.current != nil {
+		if err := s.current.Finish(ctx); err != nil {
+			s.failed = true
+		}
+		s.current = nil
+	}
+	return s.delivered && !s.failed
+}
+
+func (s *promptStream) Fail(ctx context.Context, err error) error {
+	if s.current != nil {
+		_ = s.current.Fail(ctx, err)
+		s.current = nil
+	}
+	s.failed = true
 	return nil
 }
 
@@ -565,6 +713,11 @@ func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {
 	acpSessionID := ""
 	externalSessionID := ""
 	var nextRunAt *time.Time
+	stream := &promptStream{}
+	if job.DeliveryMode == model.CronDeliveryOrigin {
+		stream = r.newCronPromptStream(job)
+		_ = stream.Start(ctx)
+	}
 	if run.Manual {
 		if job.Enabled && !job.NextRunAt.IsZero() {
 			next := job.NextRunAt
@@ -620,6 +773,7 @@ func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {
 					ACPSessionID:         session.ACPSessionID,
 					Text:                 job.Prompt,
 					SuppressPromptPrefix: true,
+					OnEvent:              stream.HandleEvent,
 				})
 				if err != nil {
 					status = model.CronRunStatusFailed
@@ -630,12 +784,18 @@ func (r *Runtime) ExecuteCronRun(ctx context.Context, run model.CronRun) error {
 			}
 		}
 	}
+	streamDelivered := false
+	if errorText != "" {
+		_ = stream.Fail(ctx, errors.New(errorText))
+	} else {
+		streamDelivered = stream.Finish(ctx)
+	}
 	completed, err := r.cfg.Store.CompleteCronRun(ctx, run.ID, status, finalText, errorText, localSessionID, acpSessionID, externalSessionID, nextRunAt)
 	if err != nil {
 		return err
 	}
 	completed.Job = job
-	return r.deliverCronRun(ctx, completed)
+	return r.deliverCronRun(ctx, completed, streamDelivered)
 }
 
 func (r *Runtime) RunDueCronJobs(ctx context.Context, now time.Time, limit int) error {
@@ -692,13 +852,15 @@ func (r *Runtime) ensureCronSession(ctx context.Context, job model.CronJob) (mod
 	return r.cfg.Store.CreateSession(ctx, key, mode, string(mode))
 }
 
-func (r *Runtime) deliverCronRun(ctx context.Context, run model.CronRun) error {
+func (r *Runtime) deliverCronRun(ctx context.Context, run model.CronRun, streamDelivered bool) error {
 	if r.cfg.Sender == nil || run.Job.DeliveryMode == model.CronDeliveryNone {
 		return nil
 	}
 	text := strings.TrimSpace(run.FinalText)
 	if run.Status != model.CronRunStatusSucceeded {
 		text = "Cron job " + run.Job.Name + " failed: " + run.Error
+	} else if streamDelivered {
+		return nil
 	} else if text == "" || strings.HasPrefix(text, "[SILENT]") {
 		return nil
 	}
@@ -1041,10 +1203,29 @@ func (r *Runtime) commandCronGet(ctx context.Context, assistantID, jobID string)
 }
 
 func (r *Runtime) commandCronPatch(ctx context.Context, key model.SessionBindingKey, jobID string, patch cronToolPatch) (string, error) {
-	if patch.Enabled == nil {
-		return "", fmt.Errorf("patch.enabled is required")
+	var replies []string
+	if patch.Name != nil {
+		name := strings.TrimSpace(*patch.Name)
+		if name == "" {
+			return "", fmt.Errorf("patch.name must not be empty")
+		}
+		job, err := r.cfg.Store.SetCronJobName(ctx, key.AssistantID, jobID, name)
+		if err != nil {
+			return "", err
+		}
+		replies = append(replies, "Cron job renamed: "+job.ID+" "+job.Name)
 	}
-	return r.commandCronSetEnabled(ctx, key, []string{jobID}, *patch.Enabled)
+	if patch.Enabled != nil {
+		reply, err := r.commandCronSetEnabled(ctx, key, []string{jobID}, *patch.Enabled)
+		if err != nil {
+			return "", err
+		}
+		replies = append(replies, reply)
+	}
+	if len(replies) == 0 {
+		return "", fmt.Errorf("patch.enabled or patch.name is required")
+	}
+	return strings.Join(replies, "\n"), nil
 }
 
 func (r *Runtime) commandCronRun(ctx context.Context, assistantID, jobID string) (string, error) {

@@ -19,6 +19,8 @@ Create:
 {"action":"add","job":{"name":"sleep reminder","schedule":{"kind":"at","at":"2099-05-23T01:10:00+08:00"},"sessionTarget":"isolated","payload":{"kind":"agentTurn","message":"提醒用户：该睡觉啦！"},"delivery":{"mode":"announce","target":"origin"}}}
 ```
 
+`job.name` is the stable title shown when the job runs. The harness should summarize a concise title at creation time. ACPA uses that title immediately at run time before the scheduled prompt is sent to the model.
+
 List:
 
 ```cron
@@ -39,6 +41,12 @@ Pause/resume:
 
 ```cron
 {"action":"update","id":"cron_xxx","patch":{"enabled":true}}
+```
+
+Rename explicitly:
+
+```cron
+{"action":"update","id":"cron_xxx","patch":{"name":"daily project summary"}}
 ```
 
 Run manually:
@@ -76,6 +84,9 @@ IM command form:
 - Use `isolated` for reminders and scheduled assistant work by default; use `main` only when the scheduled task should intentionally continue the current conversation.
 - `delivery.mode` supports `announce` with `target: "origin"`, or `none`.
 - Cron execution suppresses the cron-management prompt prefix so the scheduled prompt is the only task instruction sent to the harness for that run.
+- For Feishu origin delivery, Cron execution sends the stored title first, then streams the model reply into one or more cards.
+- Every Feishu Cron reply card includes the stored title and the Cron id; if tool or permission boundaries split the response, each new card repeats that identity.
+- Updating a Cron job preserves the existing title unless `patch.name` is explicitly provided.
 - Only owner/admin users may execute cron tool calls or `/cron` commands.
 
 Legacy `acpa-cron`, `create`/`delete`, `schedule_type`, `schedule_expr`, top-level `message`, `job_id`, and `/cron add --every ...` are not supported.

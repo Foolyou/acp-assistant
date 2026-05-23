@@ -485,6 +485,16 @@ func (s *Store) SetCronJobEnabled(ctx context.Context, assistantID, id string, e
 	return s.CronJob(ctx, assistantID, id)
 }
 
+func (s *Store) SetCronJobName(ctx context.Context, assistantID, id, name string) (model.CronJob, error) {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE cron_jobs SET name = ?, updated_at = ? WHERE assistant_id = ? AND id = ?`,
+		name, encodeTime(now), assistantID, id)
+	if err != nil {
+		return model.CronJob{}, err
+	}
+	return s.CronJob(ctx, assistantID, id)
+}
+
 func (s *Store) RemoveCronJob(ctx context.Context, assistantID, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM cron_jobs WHERE assistant_id = ? AND id = ?`, assistantID, id)
 	return err

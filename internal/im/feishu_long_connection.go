@@ -135,6 +135,10 @@ func (c *feishuSDKLongConnection) Send(ctx context.Context, input *channeltypes.
 	return c.sender.Send(ctx, input)
 }
 
+func (c *feishuSDKLongConnection) Stream(ctx context.Context, input *channeltypes.SendInput) (channeltypes.StreamController, error) {
+	return c.sender.Stream(ctx, input)
+}
+
 func (c *feishuSDKLongConnection) OnMessage(handler func(context.Context, *channeltypes.NormalizedMessage) error) {
 	c.messageHandlers = append(c.messageHandlers, handler)
 	if c.messageHandlerRegistered {

@@ -266,6 +266,102 @@ func TestRuntimePromptReturnsAgentTextChunks(t *testing.T) {
 	}
 }
 
+func TestRuntimePromptEmitsTextChunkEvents(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimePromptEmitsTextChunkEvents")
+	var events []acp.PromptEvent
+	rt := acp.NewRuntime(acp.Config{
+		Command:   cmd.Path,
+		Args:      cmd.Args[1:],
+		Workspace: t.TempDir(),
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+
+	finalText, err := rt.PromptWithOptions(ctx, "session-1", "hello", acp.PromptOptions{
+		OnEvent: func(event acp.PromptEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if finalText != "PONG" {
+		t.Fatalf("unexpected final text: %q", finalText)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected two text events, got %#v", events)
+	}
+	if events[0].Kind != acp.PromptEventText || events[0].SessionID != "session-1" || events[0].Text != "PO" {
+		t.Fatalf("unexpected first event: %#v", events[0])
+	}
+	if events[1].Kind != acp.PromptEventText || events[1].SessionID != "session-1" || events[1].Text != "NG" {
+		t.Fatalf("unexpected second event: %#v", events[1])
+	}
+}
+
+func TestRuntimePromptEmitsBoundaryEvents(t *testing.T) {
+	if os.Getenv("ACPA_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	t.Setenv("ACPA_ACP_HELPER", "1")
+	t.Setenv("ACPA_ACP_HELPER_SCENARIO", "boundary_events")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimePromptEmitsBoundaryEvents")
+	var events []acp.PromptEvent
+	rt := acp.NewRuntime(acp.Config{
+		Command:   cmd.Path,
+		Args:      cmd.Args[1:],
+		Workspace: t.TempDir(),
+		OnRequest: func(req acp.Request) bool {
+			if req.Method != "session/request_permission" {
+				return false
+			}
+			_ = req.Respond(map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": "approved"}})
+			return true
+		},
+	})
+	ctx := context.Background()
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer rt.Stop()
+
+	finalText, err := rt.PromptWithOptions(ctx, "session-1", "hello", acp.PromptOptions{
+		OnEvent: func(event acp.PromptEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if finalText != "AB" {
+		t.Fatalf("unexpected final text: %q", finalText)
+	}
+	var got []acp.PromptEventKind
+	for _, event := range events {
+		got = append(got, event.Kind)
+	}
+	want := []acp.PromptEventKind{acp.PromptEventText, acp.PromptEventBoundary, acp.PromptEventBoundary, acp.PromptEventText}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected event kinds: got %#v want %#v events=%#v", got, want, events)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected event kinds: got %#v want %#v events=%#v", got, want, events)
+		}
+	}
+}
+
 func TestRuntimeFlushesCollectedTextBeforePermissionRequest(t *testing.T) {
 	if os.Getenv("ACPA_ACP_HELPER") == "1" {
 		runACPHelperProcess()
@@ -518,6 +614,57 @@ func runACPHelperProcess() {
 						"update": map[string]any{
 							"sessionUpdate": "agent_message_chunk",
 							"content":       map[string]any{"type": "text", "text": "AFTER"},
+						},
+					},
+				})
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result":  map[string]any{"stopReason": "end_turn"},
+				})
+				continue
+			}
+			if os.Getenv("ACPA_ACP_HELPER_SCENARIO") == "boundary_events" {
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "session/update",
+					"params": map[string]any{
+						"sessionId": "session-1",
+						"update": map[string]any{
+							"sessionUpdate": "agent_message_chunk",
+							"content":       map[string]any{"type": "text", "text": "A"},
+						},
+					},
+				})
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "session/update",
+					"params": map[string]any{
+						"sessionId": "session-1",
+						"update": map[string]any{
+							"sessionUpdate": "tool_call",
+						},
+					},
+				})
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      901,
+					"method":  "session/request_permission",
+					"params": map[string]any{
+						"sessionId": "session-1",
+						"options":   []map[string]any{{"id": "approved"}, {"id": "abort"}},
+					},
+				})
+				var response map[string]json.RawMessage
+				_ = decoder.Decode(&response)
+				_ = encoder.Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "session/update",
+					"params": map[string]any{
+						"sessionId": "session-1",
+						"update": map[string]any{
+							"sessionUpdate": "agent_message_chunk",
+							"content":       map[string]any{"type": "text", "text": "B"},
 						},
 					},
 				})

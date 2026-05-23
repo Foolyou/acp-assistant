@@ -17,6 +17,7 @@ import (
 type fakeHarness struct {
 	prompts             []assistant.PromptRequest
 	resolvedPermissions []string
+	events              []assistant.PromptEvent
 	finalText           string
 	ensureErr           error
 	promptErr           error
@@ -33,6 +34,11 @@ func (f *fakeHarness) Prompt(ctx context.Context, req assistant.PromptRequest) (
 	f.prompts = append(f.prompts, req)
 	if f.promptErr != nil {
 		return assistant.PromptResult{}, f.promptErr
+	}
+	for _, event := range f.events {
+		if req.OnEvent != nil {
+			req.OnEvent(event)
+		}
 	}
 	if f.finalText != "" {
 		return assistant.PromptResult{FinalText: f.finalText}, nil
@@ -55,6 +61,40 @@ type fakeSender struct {
 
 func (s *fakeSender) Send(ctx context.Context, msg model.OutboundMessage) error {
 	s.messages = append(s.messages, msg)
+	return nil
+}
+
+type fakeStreamSender struct {
+	fakeSender
+	starts  []model.OutboundMessage
+	streams []*fakeOutboundStream
+}
+
+func (s *fakeStreamSender) StartStream(ctx context.Context, msg model.OutboundMessage) (model.OutboundStream, error) {
+	stream := &fakeOutboundStream{}
+	s.starts = append(s.starts, msg)
+	s.streams = append(s.streams, stream)
+	return stream, nil
+}
+
+type fakeOutboundStream struct {
+	appends  []string
+	finished bool
+	failed   bool
+}
+
+func (s *fakeOutboundStream) Append(ctx context.Context, text string) error {
+	s.appends = append(s.appends, text)
+	return nil
+}
+
+func (s *fakeOutboundStream) Finish(ctx context.Context) error {
+	s.finished = true
+	return nil
+}
+
+func (s *fakeOutboundStream) Fail(ctx context.Context, err error) error {
+	s.failed = true
 	return nil
 }
 
@@ -158,6 +198,109 @@ func TestRuntimeRoutesPrivateMessagesCommandsAndOwnerPermissions(t *testing.T) {
 	}
 	if len(h.resolvedPermissions) != 1 || h.resolvedPermissions[0] != perm.ShortApprovalID+":approve" {
 		t.Fatalf("permission was not forwarded to harness: %#v", h.resolvedPermissions)
+	}
+}
+
+func TestRuntimeStreamsPrivateMessageSegmentsAndSuppressesFinalSend(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{
+		events: []assistant.PromptEvent{
+			{Kind: assistant.PromptEventText, Text: "hello "},
+			{Kind: assistant.PromptEventBoundary, Reason: "tool_call"},
+			{Kind: assistant.PromptEventText, Text: "world"},
+		},
+		finalText: "hello world",
+	}
+	s := &fakeStreamSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+
+	msg := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "hello",
+	}
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("handle inbound: %v", err)
+	}
+	if len(s.messages) != 0 {
+		t.Fatalf("streamed response should suppress duplicate final send, got %#v", s.messages)
+	}
+	if len(s.starts) != 2 || len(s.streams) != 2 {
+		t.Fatalf("expected two stream segments, starts=%#v streams=%#v", s.starts, s.streams)
+	}
+	if s.starts[0].Stream == nil || s.starts[0].Stream.Kind != model.OutboundStreamNormal {
+		t.Fatalf("first stream should be ordinary stream, got %#v", s.starts[0])
+	}
+	if strings.Join(s.streams[0].appends, "") != "hello " || !s.streams[0].finished {
+		t.Fatalf("unexpected first stream: %#v", s.streams[0])
+	}
+	if strings.Join(s.streams[1].appends, "") != "world" || !s.streams[1].finished {
+		t.Fatalf("unexpected second stream: %#v", s.streams[1])
+	}
+}
+
+func TestRuntimeKeepsFinalSendForNonStreamingSender(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{
+		events: []assistant.PromptEvent{
+			{Kind: assistant.PromptEventText, Text: "ignored stream"},
+		},
+		finalText: "final answer",
+	}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+	msg := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "user-a",
+		MessageID:        "m1",
+		Text:             "hello",
+	}
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("handle inbound: %v", err)
+	}
+	if len(s.messages) != 1 || s.messages[0].Text != "final answer" {
+		t.Fatalf("non-streaming sender should receive final text, got %#v", s.messages)
 	}
 }
 
@@ -702,6 +845,82 @@ func TestRuntimeExecutesHarnessCronToolListAndDelete(t *testing.T) {
 	}
 }
 
+func TestRuntimeCronUpdateNameIsExplicit(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	owner := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "owner-a",
+		MessageID:        "m1",
+		Text:             "manage cron",
+	}
+	job, err := db.CreateCronJob(ctx, model.CronJob{
+		AssistantID:  "alpha",
+		Name:         "original title",
+		Enabled:      true,
+		ScheduleType: model.CronScheduleTypeEvery,
+		ScheduleExpr: "1h",
+		Timezone:     "UTC",
+		Prompt:       "check",
+		Target:       model.CronTargetIsolated,
+		DeliveryMode: model.CronDeliveryOrigin,
+		Creator:      owner.BindingKey(),
+		NextRunAt:    time.Date(2099, 5, 23, 8, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+		ChannelOptions: map[string]map[string]string{
+			"feishu/main": {"owner_open_id": "owner-a"},
+		},
+	})
+	update := owner
+	update.MessageID = "m2"
+	update.Text = `/cron {"action":"update","id":"` + job.ID + `","patch":{"enabled":false}}`
+	if err := rt.HandleInbound(ctx, update); err != nil {
+		t.Fatalf("pause cron: %v", err)
+	}
+	paused, err := db.CronJob(ctx, "alpha", job.ID)
+	if err != nil {
+		t.Fatalf("load paused job: %v", err)
+	}
+	if paused.Name != "original title" {
+		t.Fatalf("update without name should preserve title, got %#v", paused)
+	}
+	rename := owner
+	rename.MessageID = "m3"
+	rename.Text = `/cron {"action":"update","id":"` + job.ID + `","patch":{"name":"renamed title"}}`
+	if err := rt.HandleInbound(ctx, rename); err != nil {
+		t.Fatalf("rename cron: %v", err)
+	}
+	renamed, err := db.CronJob(ctx, "alpha", job.ID)
+	if err != nil {
+		t.Fatalf("load renamed job: %v", err)
+	}
+	if renamed.Name != "renamed title" {
+		t.Fatalf("patch.name should rename title, got %#v", renamed)
+	}
+}
+
 func TestRuntimeExecutesCronRunAndDeliversResult(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
@@ -777,6 +996,85 @@ func TestRuntimeExecutesCronRunAndDeliversResult(t *testing.T) {
 	}
 	if !loaded.Enabled || !loaded.NextRunAt.Equal(job.NextRunAt) {
 		t.Fatalf("manual run should preserve schedule, got %#v", loaded)
+	}
+}
+
+func TestRuntimeStreamsCronRunWithTitleAndIDAcrossSegments(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{
+		events: []assistant.PromptEvent{
+			{Kind: assistant.PromptEventText, Text: "first"},
+			{Kind: assistant.PromptEventBoundary, Reason: "tool_call"},
+			{Kind: assistant.PromptEventText, Text: "second"},
+		},
+		finalText: "firstsecond",
+	}
+	s := &fakeStreamSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+	})
+	now := time.Date(2026, 5, 23, 8, 0, 0, 0, time.UTC)
+	creator := model.SessionBindingKey{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "owner-a",
+	}
+	job, err := db.CreateCronJob(ctx, model.CronJob{
+		AssistantID:  "alpha",
+		Name:         "Daily Summary",
+		Enabled:      true,
+		ScheduleType: model.CronScheduleTypeEvery,
+		ScheduleExpr: "1h",
+		Timezone:     "UTC",
+		Prompt:       "summarize",
+		Target:       model.CronTargetIsolated,
+		DeliveryMode: model.CronDeliveryOrigin,
+		Creator:      creator,
+		NextRunAt:    now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	run, err := db.CreateManualCronRun(ctx, "alpha", job.ID, now)
+	if err != nil {
+		t.Fatalf("manual run: %v", err)
+	}
+	if err := rt.ExecuteCronRun(ctx, run); err != nil {
+		t.Fatalf("execute cron run: %v", err)
+	}
+	if len(s.messages) != 0 {
+		t.Fatalf("streamed cron should suppress duplicate final delivery, got %#v", s.messages)
+	}
+	if len(s.starts) != 2 || len(s.streams) != 2 {
+		t.Fatalf("expected two cron stream cards, starts=%#v streams=%#v", s.starts, s.streams)
+	}
+	for i, start := range s.starts {
+		if start.Stream == nil || start.Stream.Kind != model.OutboundStreamCron || start.Stream.CronID != job.ID || start.Stream.CronTitle != "Daily Summary" {
+			t.Fatalf("stream %d missing cron identity: %#v", i, start)
+		}
+	}
+	if strings.Join(s.streams[0].appends, "") != "first" || !s.streams[0].finished {
+		t.Fatalf("unexpected first cron stream: %#v", s.streams[0])
+	}
+	if strings.Join(s.streams[1].appends, "") != "second" || !s.streams[1].finished {
+		t.Fatalf("unexpected second cron stream: %#v", s.streams[1])
 	}
 }
 

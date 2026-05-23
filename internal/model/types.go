@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type HarnessProvider string
 
@@ -223,14 +226,34 @@ func (m InboundMessage) BindingKey() SessionBindingKey {
 }
 
 type OutboundMessage struct {
-	AssistantID      string            `json:"assistant_id"`
-	Platform         Platform          `json:"platform"`
-	AccountID        string            `json:"account_id"`
-	PrivateChannelID string            `json:"private_channel_id"`
-	PlatformUserID   string            `json:"platform_user_id"`
-	Text             string            `json:"text"`
-	CreatedAt        time.Time         `json:"created_at"`
-	PermissionPrompt *PermissionPrompt `json:"permission_prompt,omitempty"`
+	AssistantID      string                 `json:"assistant_id"`
+	Platform         Platform               `json:"platform"`
+	AccountID        string                 `json:"account_id"`
+	PrivateChannelID string                 `json:"private_channel_id"`
+	PlatformUserID   string                 `json:"platform_user_id"`
+	Text             string                 `json:"text"`
+	CreatedAt        time.Time              `json:"created_at"`
+	PermissionPrompt *PermissionPrompt      `json:"permission_prompt,omitempty"`
+	Stream           *OutboundStreamOptions `json:"stream,omitempty"`
+}
+
+type OutboundStreamKind string
+
+const (
+	OutboundStreamNormal OutboundStreamKind = "normal"
+	OutboundStreamCron   OutboundStreamKind = "cron"
+)
+
+type OutboundStreamOptions struct {
+	Kind      OutboundStreamKind `json:"kind"`
+	CronID    string             `json:"cron_id,omitempty"`
+	CronTitle string             `json:"cron_title,omitempty"`
+}
+
+type OutboundStream interface {
+	Append(context.Context, string) error
+	Finish(context.Context) error
+	Fail(context.Context, error) error
 }
 
 type PermissionPrompt struct {

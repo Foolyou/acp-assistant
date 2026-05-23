@@ -55,6 +55,21 @@ type Config struct {
 
 type PromptOptions struct {
 	SuppressPrefix bool
+	OnEvent        func(PromptEvent)
+}
+
+type PromptEventKind string
+
+const (
+	PromptEventText     PromptEventKind = "text"
+	PromptEventBoundary PromptEventKind = "boundary"
+)
+
+type PromptEvent struct {
+	SessionID string
+	Kind      PromptEventKind
+	Text      string
+	Reason    string
 }
 
 type Event struct {
@@ -83,8 +98,9 @@ type Runtime struct {
 }
 
 type promptCollector struct {
-	mu     sync.Mutex
-	chunks []string
+	mu      sync.Mutex
+	chunks  []string
+	onEvent func(PromptEvent)
 }
 
 type rpcResponse struct {
@@ -297,7 +313,7 @@ func (r *Runtime) Prompt(ctx context.Context, sessionID, text string) (string, e
 }
 
 func (r *Runtime) PromptWithOptions(ctx context.Context, sessionID, text string, opts PromptOptions) (string, error) {
-	collector := r.registerPromptCollector(sessionID)
+	collector := r.registerPromptCollector(sessionID, opts.OnEvent)
 	defer r.unregisterPromptCollector(sessionID, collector)
 
 	var result map[string]any
@@ -420,7 +436,8 @@ func (r *Runtime) readLoop(stdout io.Reader) {
 }
 
 func (r *Runtime) handleIncoming(id json.RawMessage, method string, params json.RawMessage) {
-	r.collectPromptChunk(method, params)
+	r.collectPromptUpdate(method, params)
+	r.emitPromptBoundaryBeforePermission(method, params)
 	r.flushPromptTextBeforePermission(method, params)
 
 	switch method {
@@ -467,6 +484,9 @@ func (r *Runtime) flushPromptTextBeforePermission(method string, params json.Raw
 	if err := json.Unmarshal(params, &payload); err != nil || payload.SessionID == "" {
 		return
 	}
+	if r.promptCollectorHasEvent(payload.SessionID) {
+		return
+	}
 	text := r.flushPromptCollector(payload.SessionID)
 	if strings.TrimSpace(text) == "" {
 		return
@@ -474,8 +494,8 @@ func (r *Runtime) flushPromptTextBeforePermission(method string, params json.Raw
 	r.cfg.OnPromptText(payload.SessionID, text)
 }
 
-func (r *Runtime) registerPromptCollector(sessionID string) *promptCollector {
-	collector := &promptCollector{}
+func (r *Runtime) registerPromptCollector(sessionID string, onEvent func(PromptEvent)) *promptCollector {
+	collector := &promptCollector{onEvent: onEvent}
 	r.mu.Lock()
 	r.promptCollectors[sessionID] = collector
 	r.mu.Unlock()
@@ -490,7 +510,7 @@ func (r *Runtime) unregisterPromptCollector(sessionID string, collector *promptC
 	r.mu.Unlock()
 }
 
-func (r *Runtime) collectPromptChunk(method string, params json.RawMessage) {
+func (r *Runtime) collectPromptUpdate(method string, params json.RawMessage) {
 	if method != "session/update" {
 		return
 	}
@@ -507,21 +527,54 @@ func (r *Runtime) collectPromptChunk(method string, params json.RawMessage) {
 	if err := json.Unmarshal(params, &payload); err != nil {
 		return
 	}
-	if payload.Update.SessionUpdate != "agent_message_chunk" || payload.Update.Content.Type != "text" {
+	r.mu.Lock()
+	collector := r.promptCollectors[payload.SessionID]
+	r.mu.Unlock()
+	if collector == nil {
+		return
+	}
+	if payload.Update.SessionUpdate == "agent_message_chunk" && payload.Update.Content.Type == "text" {
+		collector.Append(payload.SessionID, payload.Update.Content.Text)
+		return
+	}
+	collector.Boundary(payload.SessionID, payload.Update.SessionUpdate)
+}
+
+func (r *Runtime) emitPromptBoundaryBeforePermission(method string, params json.RawMessage) {
+	if method != "session/request_permission" {
+		return
+	}
+	var payload struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(params, &payload); err != nil || payload.SessionID == "" {
 		return
 	}
 	r.mu.Lock()
 	collector := r.promptCollectors[payload.SessionID]
 	r.mu.Unlock()
 	if collector != nil {
-		collector.Append(payload.Update.Content.Text)
+		collector.Boundary(payload.SessionID, "session/request_permission")
 	}
 }
 
-func (c *promptCollector) Append(text string) {
+func (c *promptCollector) Append(sessionID, text string) {
 	c.mu.Lock()
 	c.chunks = append(c.chunks, text)
+	onEvent := c.onEvent
 	c.mu.Unlock()
+	if onEvent != nil {
+		onEvent(PromptEvent{SessionID: sessionID, Kind: PromptEventText, Text: text})
+	}
+}
+
+func (c *promptCollector) Boundary(sessionID, reason string) {
+	c.mu.Lock()
+	onEvent := c.onEvent
+	c.mu.Unlock()
+	if onEvent != nil {
+		onEvent(PromptEvent{SessionID: sessionID, Kind: PromptEventBoundary, Reason: reason})
+	}
 }
 
 func (r *Runtime) flushPromptCollector(sessionID string) string {
@@ -532,6 +585,18 @@ func (r *Runtime) flushPromptCollector(sessionID string) string {
 		return ""
 	}
 	return collector.Flush()
+}
+
+func (r *Runtime) promptCollectorHasEvent(sessionID string) bool {
+	r.mu.Lock()
+	collector := r.promptCollectors[sessionID]
+	r.mu.Unlock()
+	if collector == nil {
+		return false
+	}
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	return collector.onEvent != nil
 }
 
 func (c *promptCollector) Flush() string {

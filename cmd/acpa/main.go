@@ -1009,7 +1009,20 @@ func (h *runtimeHarness) Prompt(ctx context.Context, req assistant.PromptRequest
 	if err != nil {
 		return assistant.PromptResult{}, err
 	}
-	finalText, err := runtime.PromptWithOptions(ctx, req.ACPSessionID, req.Text, acp.PromptOptions{SuppressPrefix: req.SuppressPromptPrefix})
+	finalText, err := runtime.PromptWithOptions(ctx, req.ACPSessionID, req.Text, acp.PromptOptions{
+		SuppressPrefix: req.SuppressPromptPrefix,
+		OnEvent: func(event acp.PromptEvent) {
+			if req.OnEvent == nil {
+				return
+			}
+			switch event.Kind {
+			case acp.PromptEventText:
+				req.OnEvent(assistant.PromptEvent{Kind: assistant.PromptEventText, Text: event.Text})
+			case acp.PromptEventBoundary:
+				req.OnEvent(assistant.PromptEvent{Kind: assistant.PromptEventBoundary, Reason: event.Reason})
+			}
+		},
+	})
 	if err != nil {
 		return assistant.PromptResult{}, err
 	}

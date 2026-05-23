@@ -56,6 +56,7 @@ type feishuLongConnection interface {
 	Start(context.Context) error
 	Stop(context.Context) error
 	Send(context.Context, *channeltypes.SendInput) (*channeltypes.SendResult, error)
+	Stream(context.Context, *channeltypes.SendInput) (channeltypes.StreamController, error)
 	OnMessage(func(context.Context, *channeltypes.NormalizedMessage) error)
 	OnCardAction(func(context.Context, *channeltypes.CardActionEvent) (*callback.CardActionTriggerResponse, error))
 	OnReject(func(context.Context, *channeltypes.RejectEvent) error)
@@ -313,6 +314,92 @@ func (a *FeishuAccount) Send(ctx context.Context, msg model.OutboundMessage) err
 		return fmt.Errorf("Feishu send failed: %s", strings.TrimSpace(string(data)))
 	}
 	return nil
+}
+
+func (a *FeishuAccount) StartStream(ctx context.Context, msg model.OutboundMessage) (model.OutboundStream, error) {
+	a.connMu.Lock()
+	conn := a.conn
+	a.connMu.Unlock()
+	if conn == nil {
+		return nil, fmt.Errorf("Feishu long connection is not available")
+	}
+	if msg.Stream == nil {
+		return nil, fmt.Errorf("stream options are required")
+	}
+	controller, err := conn.Stream(ctx, &channeltypes.SendInput{
+		ReceiveID: msg.PlatformUserID,
+		ChatID:    msg.PrivateChannelID,
+		MsgType:   "interactive",
+		Card:      renderFeishuStreamCard(*msg.Stream, ""),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &feishuOutboundStream{controller: controller, opts: *msg.Stream}, nil
+}
+
+type feishuOutboundStream struct {
+	controller channeltypes.StreamController
+	opts       model.OutboundStreamOptions
+	text       strings.Builder
+}
+
+func (s *feishuOutboundStream) Append(ctx context.Context, text string) error {
+	s.text.WriteString(text)
+	return s.controller.UpdateCard(ctx, renderFeishuStreamCard(s.opts, s.text.String()))
+}
+
+func (s *feishuOutboundStream) Finish(ctx context.Context) error {
+	return s.controller.Close(ctx)
+}
+
+func (s *feishuOutboundStream) Fail(ctx context.Context, err error) error {
+	message := "Stream failed"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		message += ": " + err.Error()
+	}
+	_ = s.controller.UpdateCard(ctx, renderFeishuStreamCard(s.opts, message))
+	return s.controller.Close(ctx)
+}
+
+func renderFeishuStreamCard(opts model.OutboundStreamOptions, text string) string {
+	content := strings.TrimSpace(text)
+	if content == "" {
+		content = "生成中..."
+	}
+	card := map[string]any{
+		"config": map[string]any{"wide_screen_mode": true},
+		"elements": []any{
+			map[string]any{
+				"tag":  "div",
+				"text": map[string]string{"tag": "lark_md", "content": content},
+			},
+		},
+	}
+	if opts.Kind == model.OutboundStreamCron {
+		title := strings.TrimSpace(opts.CronTitle)
+		if title == "" {
+			title = "Cron"
+		}
+		card["header"] = map[string]any{
+			"title": map[string]string{"tag": "plain_text", "content": title},
+		}
+		card["elements"] = []any{
+			map[string]any{
+				"tag":  "div",
+				"text": map[string]string{"tag": "lark_md", "content": content},
+			},
+			map[string]any{"tag": "hr"},
+			map[string]any{
+				"tag": "note",
+				"elements": []any{
+					map[string]string{"tag": "plain_text", "content": "Cron reply · " + strings.TrimSpace(opts.CronID)},
+				},
+			},
+		}
+	}
+	data, _ := json.Marshal(card)
+	return string(data)
 }
 
 func renderFeishuPermissionCard(prompt model.PermissionPrompt) string {
