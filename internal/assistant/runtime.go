@@ -380,7 +380,7 @@ func (r *Runtime) executeHarnessCronTool(ctx context.Context, msg model.InboundM
 	case "create":
 		opts := cronCommandOptions{
 			Name:         defaultString(call.Name, "cron job"),
-			ScheduleType: model.CronScheduleType(strings.TrimSpace(call.ScheduleType)),
+			ScheduleType: normalizeHarnessCronScheduleType(call.ScheduleType),
 			ScheduleExpr: strings.TrimSpace(call.ScheduleExpr),
 			Timezone:     defaultString(call.Timezone, "UTC"),
 			Prompt:       strings.TrimSpace(call.Message),
@@ -430,6 +430,17 @@ func normalizeHarnessCronAction(action string) string {
 		return "delete"
 	}
 	return action
+}
+
+func normalizeHarnessCronScheduleType(scheduleType string) model.CronScheduleType {
+	switch strings.ToLower(strings.TrimSpace(scheduleType)) {
+	case "interval", "fixed_interval", "fixed-interval", "repeat", "repeating", "recurring":
+		return model.CronScheduleTypeEvery
+	case "once", "one_time", "one-time", "datetime", "date_time":
+		return model.CronScheduleTypeAt
+	default:
+		return model.CronScheduleType(strings.TrimSpace(scheduleType))
+	}
 }
 
 func defaultString(value, fallback string) string {
@@ -906,6 +917,11 @@ func (r *Runtime) createCronJob(ctx context.Context, msg model.InboundMessage, o
 	next, err := cronpkg.NextRun(opts.ScheduleType, opts.ScheduleExpr, opts.Timezone, now, now)
 	if err != nil {
 		return model.CronJob{}, err
+	}
+	if opts.ScheduleType == model.CronScheduleTypeAt {
+		if _, ok := cronpkg.RelativeDuration(opts.ScheduleExpr); ok {
+			opts.ScheduleExpr = next.Format(time.RFC3339)
+		}
 	}
 	policy := r.effectivePolicy(msg.BindingKey())
 	mode := policy.DefaultMode

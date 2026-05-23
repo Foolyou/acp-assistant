@@ -51,7 +51,7 @@ List:
 {"action":"list"}
 ` + "```" + `
 
-Use RFC3339 with an explicit offset for one-time reminders. Use Go durations such as 10m, 2h, or 24h for fixed intervals. Use five-field cron expressions for calendar schedules. Default timezone to Asia/Shanghai and delivery to origin. Use target isolated unless the user explicitly asks the scheduled task to continue the current conversation, in which case use target main. Always make message a self-contained prompt describing exactly what the harness should say or do when the schedule fires. Do not tell the user a reminder or schedule has been created unless you returned an acpa-cron block.`
+Use only these schedule_type values: at, every, cron. Do not use aliases such as interval. Use RFC3339 with an explicit offset for one-time reminders; if the user gives a relative one-time reminder such as "in 10 minutes", calculate the absolute RFC3339 time. Use schedule_type every with Go durations such as 10m, 2h, or 24h for fixed intervals. Use schedule_type cron with five-field cron expressions for calendar schedules. Default timezone to Asia/Shanghai and delivery to origin. Use target isolated unless the user explicitly asks the scheduled task to continue the current conversation, in which case use target main. Always make message a self-contained prompt describing exactly what the harness should say or do when the schedule fires. Do not tell the user a reminder or schedule has been created unless you returned an acpa-cron block.`
 
 func builtInSkillsFor(provider model.HarnessProvider) []builtInSkill {
 	_ = provider

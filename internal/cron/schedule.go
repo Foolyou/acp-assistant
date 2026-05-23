@@ -35,6 +35,13 @@ func nextAt(expr string, loc *time.Location, now time.Time) (time.Time, error) {
 	if expr == "" {
 		return time.Time{}, fmt.Errorf("at schedule requires a time")
 	}
+	if d, ok := RelativeDuration(expr); ok {
+		t := now.Add(d).UTC()
+		if !t.After(now) {
+			return time.Time{}, fmt.Errorf("at schedule must be in the future")
+		}
+		return t, nil
+	}
 	if t, err := time.Parse(time.RFC3339, expr); err == nil {
 		t = t.UTC()
 		if !t.After(now) {
@@ -52,6 +59,18 @@ func nextAt(expr string, loc *time.Location, now time.Time) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("invalid at schedule %q", expr)
+}
+
+func RelativeDuration(expr string) (time.Duration, bool) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(expr)
+	if err != nil {
+		return 0, false
+	}
+	return d, true
 }
 
 func nextEvery(expr string, now, last time.Time) (time.Time, error) {

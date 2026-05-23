@@ -540,6 +540,79 @@ func TestRuntimeExecutesHarnessCronToolCreate(t *testing.T) {
 	}
 }
 
+func TestRuntimeNormalizesHarnessCronScheduleAliases(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHarness{}
+	s := &fakeSender{}
+	rt := assistant.NewRuntime(assistant.RuntimeConfig{
+		AssistantID: "alpha",
+		Provider:    model.ProviderCodex,
+		Store:       db,
+		Harness:     h,
+		Sender:      s,
+		Policy: model.PolicySet{
+			Assistant: model.Policy{AllowedModes: []model.PermissionMode{model.PermissionManual}, DefaultMode: model.PermissionManual},
+		},
+		ChannelOptions: map[string]map[string]string{
+			"feishu/main": {"owner_open_id": "owner-a"},
+		},
+	})
+	msg := model.InboundMessage{
+		AssistantID:      "alpha",
+		Platform:         model.PlatformFeishu,
+		AccountID:        "main",
+		PrivateChannelID: "chat-a",
+		PlatformUserID:   "owner-a",
+		MessageID:        "m1",
+		Text:             "请每1分钟提醒我一次站起来活动",
+	}
+	h.finalText = "```acpa-cron\n{\"action\":\"create\",\"name\":\"stand interval\",\"schedule_type\":\"interval\",\"schedule_expr\":\"1m\",\"timezone\":\"Asia/Shanghai\",\"message\":\"提醒用户站起来活动\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n```"
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("interval alias cron tool create: %v", err)
+	}
+	msg.MessageID = "m2"
+	msg.Text = "1分钟后提醒我一次站起来活动"
+	h.finalText = "```acpa-cron\n{\"action\":\"create\",\"name\":\"stand once\",\"schedule_type\":\"at\",\"schedule_expr\":\"+1m\",\"timezone\":\"Asia/Shanghai\",\"message\":\"提醒用户站起来活动\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n```"
+	before := time.Now().UTC()
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("relative at cron tool create: %v", err)
+	}
+	after := time.Now().UTC()
+	jobs, err := db.ListCronJobs(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("list cron jobs: %v", err)
+	}
+	byName := map[string]model.CronJob{}
+	for _, job := range jobs {
+		byName[job.Name] = job
+	}
+	interval := byName["stand interval"]
+	if interval.ScheduleType != model.CronScheduleTypeEvery || interval.ScheduleExpr != "1m" {
+		t.Fatalf("expected interval alias to normalize to every 1m, got %#v", interval)
+	}
+	once := byName["stand once"]
+	if once.ScheduleType != model.CronScheduleTypeAt {
+		t.Fatalf("expected relative at job, got %#v", once)
+	}
+	if once.ScheduleExpr == "+1m" {
+		t.Fatalf("relative at schedule should be stored as an absolute time, got %#v", once)
+	}
+	if _, err := time.Parse(time.RFC3339, once.ScheduleExpr); err != nil {
+		t.Fatalf("relative at schedule should be canonical RFC3339, got %q: %v", once.ScheduleExpr, err)
+	}
+	if once.NextRunAt.Before(before.Add(time.Minute)) || once.NextRunAt.After(after.Add(time.Minute+time.Second)) {
+		t.Fatalf("unexpected relative at next run: got %s between %s and %s", once.NextRunAt, before.Add(time.Minute), after.Add(time.Minute+time.Second))
+	}
+}
+
 func TestRuntimeExecutesHarnessCronToolListAndDelete(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))

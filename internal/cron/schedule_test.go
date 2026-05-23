@@ -19,6 +19,14 @@ func TestNextRunForAtEveryAndCronSchedules(t *testing.T) {
 		t.Fatalf("unexpected at next run: %s", atNext)
 	}
 
+	relativeAtNext, err := cron.NextRun(model.CronScheduleTypeAt, "+1m", "UTC", now, time.Time{})
+	if err != nil {
+		t.Fatalf("relative at next run: %v", err)
+	}
+	if !relativeAtNext.Equal(time.Date(2026, 5, 23, 8, 16, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected relative at next run: %s", relativeAtNext)
+	}
+
 	everyNext, err := cron.NextRun(model.CronScheduleTypeEvery, "15m", "UTC", now, now)
 	if err != nil {
 		t.Fatalf("every next run: %v", err)

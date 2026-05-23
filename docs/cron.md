@@ -33,7 +33,7 @@ List:
 
 ## Execution Rules
 
-- `schedule_type` supports `at`, `every`, and five-field `cron`.
+- `schedule_type` supports only `at`, `every`, and five-field `cron`.
 - `at` schedules should use RFC3339 with an explicit offset.
 - `every` schedules use Go durations such as `10m`, `2h`, or `24h`.
 - `target` supports `isolated` and `main`.
