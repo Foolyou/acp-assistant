@@ -646,7 +646,7 @@ func TestRuntimeExecutesHarnessCronToolCreate(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	h := &fakeHarness{finalText: "```cron\n{\"action\":\"add\",\"job\":{\"name\":\"sleep reminder\",\"schedule\":{\"kind\":\"at\",\"at\":\"2099-05-23T01:10:00+08:00\"},\"sessionTarget\":\"isolated\",\"payload\":{\"kind\":\"agentTurn\",\"message\":\"提醒我睡觉\"},\"delivery\":{\"mode\":\"announce\",\"target\":\"origin\"}}}\n```"}
+	h := &fakeHarness{finalText: "```cron\n{\"action\":\"add\",\"job\":{\"name\":\"sleep reminder\",\"recurring\":false,\"schedule\":{\"kind\":\"at\",\"at\":\"2099-05-23T01:10:00+08:00\"},\"sessionTarget\":\"isolated\",\"payload\":{\"kind\":\"agentTurn\",\"message\":\"提醒我睡觉\"},\"delivery\":{\"mode\":\"announce\",\"target\":\"origin\"}}}\n```"}
 	s := &fakeSender{}
 	rt := assistant.NewRuntime(assistant.RuntimeConfig{
 		AssistantID: "alpha",

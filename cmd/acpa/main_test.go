@@ -17,10 +17,72 @@ import (
 	"github.com/Foolyou/acp-assistant/internal/assistant"
 	"github.com/Foolyou/acp-assistant/internal/configspace"
 	"github.com/Foolyou/acp-assistant/internal/diagnostics"
+	"github.com/Foolyou/acp-assistant/internal/im"
 	"github.com/Foolyou/acp-assistant/internal/model"
 	"github.com/Foolyou/acp-assistant/internal/store"
 	_ "modernc.org/sqlite"
 )
+
+type fakeConnectorAccount struct {
+	status model.ConnectorStatus
+	sent   []model.OutboundMessage
+}
+
+func (a *fakeConnectorAccount) Start(context.Context) error { return nil }
+func (a *fakeConnectorAccount) Stop(context.Context) error  { return nil }
+func (a *fakeConnectorAccount) Send(ctx context.Context, msg model.OutboundMessage) error {
+	a.sent = append(a.sent, msg)
+	return nil
+}
+func (a *fakeConnectorAccount) Status() model.ConnectorStatus { return a.status }
+func (a *fakeConnectorAccount) Logs() []string                { return nil }
+func (a *fakeConnectorAccount) RefreshToken(context.Context) error {
+	return nil
+}
+
+type fakeStreamingConnectorAccount struct {
+	fakeConnectorAccount
+	starts []model.OutboundMessage
+}
+
+func (a *fakeStreamingConnectorAccount) StartStream(ctx context.Context, msg model.OutboundMessage) (model.OutboundStream, error) {
+	a.starts = append(a.starts, msg)
+	return &fakeConnectorStream{}, nil
+}
+
+type fakeConnectorStream struct{}
+
+func (s *fakeConnectorStream) Append(context.Context, string) error { return nil }
+func (s *fakeConnectorStream) Finish(context.Context) error         { return nil }
+func (s *fakeConnectorStream) Fail(context.Context, error) error    { return nil }
+
+var _ im.Account = (*fakeConnectorAccount)(nil)
+
+func TestConnectorSenderStartsStreams(t *testing.T) {
+	ctx := context.Background()
+	sender := newConnectorSender()
+	account := &fakeStreamingConnectorAccount{
+		fakeConnectorAccount: fakeConnectorAccount{
+			status: model.ConnectorStatus{
+				Platform:  model.PlatformFeishu,
+				AccountID: "main",
+			},
+		},
+	}
+	sender.Register(account)
+
+	msg := model.OutboundMessage{
+		Platform:  model.PlatformFeishu,
+		AccountID: "main",
+		Stream:    &model.OutboundStreamOptions{Kind: model.OutboundStreamNormal},
+	}
+	if _, err := sender.StartStream(ctx, msg); err != nil {
+		t.Fatalf("start stream: %v", err)
+	}
+	if len(account.starts) != 1 || account.starts[0].Stream == nil || account.starts[0].Stream.Kind != model.OutboundStreamNormal {
+		t.Fatalf("stream was not forwarded to account: %#v", account.starts)
+	}
+}
 
 func TestAssistantCreateInspectAndChannelOnboarding(t *testing.T) {
 	ctx := context.Background()

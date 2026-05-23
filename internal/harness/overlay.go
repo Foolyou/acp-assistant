@@ -98,6 +98,7 @@ func hostCronProtocolInstructions() string {
 		"```",
 		"",
 		"Choose job.name as a concise stable title for the scheduled work. ACPA shows this title immediately when the cron runs, before the model completes the scheduled prompt.",
+		"Do not include a recurring boolean. One-time reminders use schedule.kind at. Repeating reminders use schedule.kind every or cron.",
 		"",
 		"Rename only when the user explicitly asks to rename or the scheduled work meaning changes:",
 		"```cron",

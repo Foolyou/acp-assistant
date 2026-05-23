@@ -1252,6 +1252,23 @@ func (s *connectorSender) Send(ctx context.Context, msg model.OutboundMessage) e
 	return account.Send(ctx, msg)
 }
 
+func (s *connectorSender) StartStream(ctx context.Context, msg model.OutboundMessage) (model.OutboundStream, error) {
+	key := string(msg.Platform) + "/" + msg.AccountID
+	s.mu.Lock()
+	account := s.accounts[key]
+	s.mu.Unlock()
+	if account == nil {
+		return nil, fmt.Errorf("connector account %s is not registered", key)
+	}
+	streamer, ok := account.(interface {
+		StartStream(context.Context, model.OutboundMessage) (model.OutboundStream, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("connector account %s does not support streaming", key)
+	}
+	return streamer.StartStream(ctx, msg)
+}
+
 type multiFlag []string
 
 func (m *multiFlag) String() string {

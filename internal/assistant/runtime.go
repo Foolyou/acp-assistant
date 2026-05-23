@@ -71,6 +71,7 @@ type cronToolJob struct {
 	SessionTarget string            `json:"sessionTarget"`
 	Payload       cronToolPayload   `json:"payload"`
 	Delivery      *cronToolDelivery `json:"delivery,omitempty"`
+	Recurring     *bool             `json:"recurring,omitempty"`
 }
 
 type cronToolSchedule struct {
