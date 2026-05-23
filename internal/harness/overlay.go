@@ -54,7 +54,7 @@ func RenderManagedInstructions(configspacePath string, provider model.HarnessPro
 	if err != nil {
 		return "", err
 	}
-	sections := []string{managedInstructionPreamble(provider)}
+	sections := []string{managedInstructionPreamble(provider), hostCronProtocolInstructions()}
 	for _, path := range []string{
 		filepath.Join(configspacePath, configspace.InstructionsDir, configspace.CommonInstructionsFile),
 		filepath.Join(configspacePath, configspace.InstructionsDir, providerFile),
@@ -82,6 +82,33 @@ func managedInstructionPreamble(provider model.HarnessProvider) string {
 		text += " Do not write shared project guidance directly into `CLAUDE.md`; it is only a bridge to `AGENTS.md`."
 	}
 	return text
+}
+
+func hostCronProtocolInstructions() string {
+	return strings.Join([]string{
+		"ACPA host cron protocol:",
+		"",
+		"When the user asks to create a reminder, schedule one-time work, schedule recurring work, remove scheduled work, or list scheduled jobs, use the host cron protocol instead of merely saying it is done.",
+		"",
+		"Return exactly one fenced JSON block using ```cron and no user-facing prose. ACPA will execute the block, then ACPA will send the confirmation or error.",
+		"",
+		"Add:",
+		"```cron",
+		`{"action":"add","job":{"name":"short name","schedule":{"kind":"at","at":"2099-01-02T15:04:05+08:00"},"sessionTarget":"isolated","payload":{"kind":"agentTurn","message":"self-contained reminder or task prompt"},"delivery":{"mode":"announce","target":"origin"}}}`,
+		"```",
+		"",
+		"List:",
+		"```cron",
+		`{"action":"list"}`,
+		"```",
+		"",
+		"Remove:",
+		"```cron",
+		`{"action":"remove","id":"cron_xxx"}`,
+		"```",
+		"",
+		"Use schedule.kind at with RFC3339 times, every with everyMs, or cron with expr and optional tz. Use payload.kind agentTurn with a self-contained message. Use sessionTarget isolated unless the user explicitly asks scheduled work to continue the main conversation. Use delivery mode announce with target origin by default, or none when the user asks for no delivery.",
+	}, "\n")
 }
 
 func ManagedInstructionPaths(configspacePath string, provider model.HarnessProvider) ([]string, error) {

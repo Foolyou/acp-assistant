@@ -30,43 +30,14 @@ type ManagedSkillMarker struct {
 	ContentHash string `json:"content_hash"`
 }
 
-const builtInCronProtocol = `ACPA built-in cron protocol:
-
-When the user asks to create a reminder, schedule one-time work, schedule recurring work, delete a scheduled job, or list scheduled jobs, you MUST use the host cron protocol instead of merely saying it is done.
-
-Return exactly one fenced JSON block using ` + "```acpa-cron" + ` and no user-facing prose. ACPA will execute the block, then ACPA will send the confirmation or error.
-
-Create:
-` + "```acpa-cron" + `
-{"action":"create","name":"short name","schedule_type":"at","schedule_expr":"2099-01-02T15:04:05+08:00","timezone":"Asia/Shanghai","message":"self-contained reminder or task prompt","target":"isolated","delivery":"origin"}
-` + "```" + `
-
-Delete:
-` + "```acpa-cron" + `
-{"action":"delete","job_id":"cron_xxx"}
-` + "```" + `
-
-List:
-` + "```acpa-cron" + `
-{"action":"list"}
-` + "```" + `
-
-Use only these schedule_type values: at, every, cron. Do not use aliases such as interval. Use RFC3339 with an explicit offset for one-time reminders; if the user gives a relative one-time reminder such as "in 10 minutes", calculate the absolute RFC3339 time. Use schedule_type every with Go durations such as 10m, 2h, or 24h for fixed intervals. Use schedule_type cron with five-field cron expressions for calendar schedules. Default timezone to Asia/Shanghai and delivery to origin. Use target isolated unless the user explicitly asks the scheduled task to continue the current conversation, in which case use target main. Always make message a self-contained prompt describing exactly what the harness should say or do when the schedule fires. Do not tell the user a reminder or schedule has been created unless you returned an acpa-cron block.`
-
 func builtInSkillsFor(provider model.HarnessProvider) []builtInSkill {
 	_ = provider
-	description := "Create, delete, and list ACPA scheduled reminders and recurring assistant work."
-	return []builtInSkill{
-		{
-			Name: "acpa-cron",
-			Content: "---\n" +
-				"name: acpa-cron\n" +
-				"description: " + description + "\n" +
-				"---\n\n" +
-				"# ACPA Cron\n\n" +
-				builtInCronProtocol + "\n",
-		},
-	}
+	return nil
+}
+
+func retiredBuiltInSkillsFor(provider model.HarnessProvider) []builtInSkill {
+	_ = provider
+	return []builtInSkill{{Name: "acpa-cron"}}
 }
 
 func MaterializeBuiltInSkills(workspacePath string, provider model.HarnessProvider) error {
@@ -79,6 +50,11 @@ func MaterializeBuiltInSkills(workspacePath string, provider model.HarnessProvid
 	}
 	if err := ensureManagedSkillGitignore(workspacePath); err != nil {
 		return err
+	}
+	for _, skill := range retiredBuiltInSkillsFor(provider) {
+		if err := removeRetiredBuiltInSkill(root, provider, skill); err != nil {
+			return err
+		}
 	}
 	for _, skill := range builtInSkillsFor(provider) {
 		if err := materializeBuiltInSkill(root, provider, skill); err != nil {
@@ -110,6 +86,28 @@ func ExpectedManagedSkillDirs(workspacePath string, provider model.HarnessProvid
 		out = append(out, filepath.Join(root, skill.Name))
 	}
 	return out
+}
+
+func removeRetiredBuiltInSkill(root string, provider model.HarnessProvider, skill builtInSkill) error {
+	target := filepath.Join(root, skill.Name)
+	info, err := os.Stat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	marker, err := ReadManagedSkillMarker(target)
+	if err != nil {
+		return nil
+	}
+	if marker.Name != skill.Name || marker.Provider != string(provider) {
+		return nil
+	}
+	return os.RemoveAll(target)
 }
 
 func ReadManagedSkillMarker(skillDir string) (ManagedSkillMarker, error) {

@@ -4,41 +4,78 @@ ACPA cron is an assistant-owned scheduler for reminders and recurring assistant 
 
 ## Surfaces
 
-ACPA exposes cron through two surfaces:
+ACPA exposes cron through one canonical host protocol:
 
-- Owner/admin IM commands for deterministic operations: `/cron add`, `/cron list`, `/cron pause`, `/cron resume`, `/cron remove`, `/cron run`, and `/cron runs`.
-- A built-in harness skill named `acpa-cron`, injected into Codex and Claude overlays. The same cron protocol is also included in the first prompt sent to each ACP session so active harnesses can see it without repeating it through the whole session history. The protocol tells the harness to return a fenced `acpa-cron` JSON block for `create`, `delete`, and `list` operations. The assistant runtime executes the block and sends the confirmation or error to the user.
+- Harness responses return a fenced `cron` JSON block.
+- Owner/admin IM commands pass the same JSON after `/cron`.
 
-The runtime does not parse arbitrary natural-language reminders itself. Natural-language understanding belongs to the harness; the host only validates and executes the structured cron tool call.
+Cron is not a skill. The host injects concise cron protocol instructions into the managed harness instructions path and remains the only executor. The runtime does not parse arbitrary natural-language reminders itself; natural-language understanding belongs to the harness, while the host validates and executes structured cron requests.
 
-## Harness Tool Block
+## Protocol
 
 Create:
 
-```acpa-cron
-{"action":"create","name":"sleep reminder","schedule_type":"at","schedule_expr":"2099-05-23T01:10:00+08:00","timezone":"Asia/Shanghai","message":"提醒用户：该睡觉啦！","target":"isolated","delivery":"origin"}
-```
-
-Delete:
-
-```acpa-cron
-{"action":"delete","job_id":"cron_xxx"}
+```cron
+{"action":"add","job":{"name":"sleep reminder","schedule":{"kind":"at","at":"2099-05-23T01:10:00+08:00"},"sessionTarget":"isolated","payload":{"kind":"agentTurn","message":"提醒用户：该睡觉啦！"},"delivery":{"mode":"announce","target":"origin"}}}
 ```
 
 List:
 
-```acpa-cron
+```cron
 {"action":"list"}
+```
+
+Get:
+
+```cron
+{"action":"get","id":"cron_xxx"}
+```
+
+Pause/resume:
+
+```cron
+{"action":"update","id":"cron_xxx","patch":{"enabled":false}}
+```
+
+```cron
+{"action":"update","id":"cron_xxx","patch":{"enabled":true}}
+```
+
+Run manually:
+
+```cron
+{"action":"run","id":"cron_xxx"}
+```
+
+Run history:
+
+```cron
+{"action":"runs","id":"cron_xxx"}
+```
+
+Remove:
+
+```cron
+{"action":"remove","id":"cron_xxx"}
+```
+
+IM command form:
+
+```text
+/cron {"action":"list"}
 ```
 
 ## Execution Rules
 
-- `schedule_type` supports only `at`, `every`, and five-field `cron`.
-- `at` schedules should use RFC3339 with an explicit offset.
-- `every` schedules use Go durations such as `10m`, `2h`, or `24h`.
-- `target` supports `isolated` and `main`.
+- `schedule.kind` supports `at`, `every`, and `cron`.
+- `at` schedules use `schedule.at` as an RFC3339 time with an explicit offset.
+- `every` schedules use `schedule.everyMs`.
+- `cron` schedules use five-field `schedule.expr` and optional IANA `schedule.tz`.
+- `payload.kind` supports `agentTurn`; `payload.message` must be self-contained.
+- `sessionTarget` supports `isolated` and `main`.
 - Use `isolated` for reminders and scheduled assistant work by default; use `main` only when the scheduled task should intentionally continue the current conversation.
-- Scheduled prompts are always executed by the harness and should be self-contained.
+- `delivery.mode` supports `announce` with `target: "origin"`, or `none`.
 - Cron execution suppresses the cron-management prompt prefix so the scheduled prompt is the only task instruction sent to the harness for that run.
-- `delivery` defaults to `origin`.
 - Only owner/admin users may execute cron tool calls or `/cron` commands.
+
+Legacy `acpa-cron`, `create`/`delete`, `schedule_type`, `schedule_expr`, top-level `message`, `job_id`, and `/cron add --every ...` are not supported.

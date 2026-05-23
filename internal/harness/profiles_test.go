@@ -125,8 +125,8 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 		filepath.Join(cfg.WorkspacePath, ".agents", "skills", "acpa-cron", "SKILL.md"),
 		filepath.Join(cfg.WorkspacePath, ".agents", "skills", "acpa-cron", ".acpa-managed.json"),
 	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected %s to exist: %v", path, err)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("managed cron skill should not be materialized at %s, err=%v", path, err)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(cfg.ConfigspacePath, "harness", "codex-home")); !os.IsNotExist(err) {
@@ -135,15 +135,11 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 	if !strings.Contains(overlay.ManagedInstructions, "common managed instructions") || !strings.Contains(overlay.ManagedInstructions, "codex managed instructions") || strings.Contains(overlay.ManagedInstructions, "claude managed instructions") {
 		t.Fatalf("unexpected codex managed instructions: %q", overlay.ManagedInstructions)
 	}
+	if !strings.Contains(overlay.ManagedInstructions, "host cron protocol") || !strings.Contains(overlay.ManagedInstructions, "```cron") || strings.Contains(overlay.ManagedInstructions, "acpa-cron") {
+		t.Fatalf("managed instructions should include canonical cron protocol only, got %q", overlay.ManagedInstructions)
+	}
 	if !strings.Contains(overlay.ManagedInstructions, "AGENTS.md") || strings.TrimSpace(overlay.PromptPrefix) != "" {
 		t.Fatalf("managed instructions should mention AGENTS.md and prompt prefix should be empty: %#v", overlay)
-	}
-	gitignore, err := os.ReadFile(filepath.Join(cfg.WorkspacePath, ".gitignore"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(gitignore), ".agents/skills/acpa-*/") || !strings.Contains(string(gitignore), ".claude/skills/acpa-*/") {
-		t.Fatalf("expected managed skill ignore rules, got %q", string(gitignore))
 	}
 
 	cfg.Harness.Provider = model.ProviderClaude
@@ -173,16 +169,19 @@ func TestPrepareOverlayGeneratesProviderFiles(t *testing.T) {
 		filepath.Join(cfg.WorkspacePath, ".claude", "skills", "acpa-cron", "SKILL.md"),
 		filepath.Join(cfg.WorkspacePath, ".claude", "skills", "acpa-cron", ".acpa-managed.json"),
 	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected %s to exist: %v", path, err)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("managed cron skill should not be materialized at %s, err=%v", path, err)
 		}
 	}
 	if !strings.Contains(overlay.ManagedInstructions, "common managed instructions") || !strings.Contains(overlay.ManagedInstructions, "claude managed instructions") || strings.Contains(overlay.ManagedInstructions, "codex managed instructions") {
 		t.Fatalf("unexpected claude managed instructions: %q", overlay.ManagedInstructions)
 	}
+	if !strings.Contains(overlay.ManagedInstructions, "host cron protocol") || !strings.Contains(overlay.ManagedInstructions, "```cron") || strings.Contains(overlay.ManagedInstructions, "acpa-cron") {
+		t.Fatalf("managed instructions should include canonical cron protocol only, got %q", overlay.ManagedInstructions)
+	}
 }
 
-func TestPrepareOverlayFailsOnUnownedManagedSkillCollision(t *testing.T) {
+func TestPrepareOverlayAllowsCronNamedWorkspaceSkill(t *testing.T) {
 	root := t.TempDir()
 	cfg := configspace.ApplyAssistantHome(model.AssistantConfig{
 		ID:       "alpha",
@@ -201,7 +200,7 @@ func TestPrepareOverlayFailsOnUnownedManagedSkillCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := harness.PrepareOverlay(cfg, root); err == nil || !strings.Contains(err.Error(), "unowned") {
-		t.Fatalf("expected unowned collision error, got %v", err)
+	if _, err := harness.PrepareOverlay(cfg, root); err != nil {
+		t.Fatalf("cron-like workspace skills should not collide with host cron protocol: %v", err)
 	}
 }

@@ -446,7 +446,7 @@ func TestRuntimeCronCommandsRequireOwnerAndCreateJobs(t *testing.T) {
 		PrivateChannelID: "chat-a",
 		PlatformUserID:   "user-a",
 		MessageID:        "m1",
-		Text:             "/cron list",
+		Text:             `/cron {"action":"list"}`,
 	}
 	if err := rt.HandleInbound(ctx, user); err != nil {
 		t.Fatalf("cron list denied should be reported to sender: %v", err)
@@ -457,7 +457,7 @@ func TestRuntimeCronCommandsRequireOwnerAndCreateJobs(t *testing.T) {
 	owner := user
 	owner.PlatformUserID = "owner-a"
 	owner.MessageID = "m2"
-	owner.Text = "/cron add --every 1h --name hourly --message summarize workspace"
+	owner.Text = `/cron {"action":"add","job":{"name":"hourly","schedule":{"kind":"every","everyMs":3600000},"sessionTarget":"isolated","payload":{"kind":"agentTurn","message":"summarize workspace"},"delivery":{"mode":"announce","target":"origin"}}}`
 	if err := rt.HandleInbound(ctx, owner); err != nil {
 		t.Fatalf("cron add: %v", err)
 	}
@@ -472,12 +472,24 @@ func TestRuntimeCronCommandsRequireOwnerAndCreateJobs(t *testing.T) {
 		t.Fatalf("unexpected cron job: %#v", jobs)
 	}
 	owner.MessageID = "m3"
-	owner.Text = "/cron list"
+	owner.Text = `/cron {"action":"list"}`
 	if err := rt.HandleInbound(ctx, owner); err != nil {
 		t.Fatalf("cron list: %v", err)
 	}
 	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, jobs[0].ID) || !strings.Contains(s.messages[2].Text, "hourly") {
 		t.Fatalf("cron list should show created job, got %#v", s.messages)
+	}
+	owner.MessageID = "m4"
+	owner.Text = "/cron add --every 1h --name legacy --message should not work"
+	if err := rt.HandleInbound(ctx, owner); err != nil {
+		t.Fatalf("legacy cron add should be reported to sender: %v", err)
+	}
+	afterLegacy, err := db.ListCronJobs(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("list cron jobs after legacy add: %v", err)
+	}
+	if len(afterLegacy) != 1 || !strings.Contains(s.messages[3].Text, "Command failed") {
+		t.Fatalf("legacy /cron add flags should be rejected without creating a job, jobs=%#v messages=%#v", afterLegacy, s.messages)
 	}
 }
 
@@ -491,7 +503,7 @@ func TestRuntimeExecutesHarnessCronToolCreate(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	h := &fakeHarness{finalText: "```acpa-cron\n{\"action\":\"create\",\"name\":\"sleep reminder\",\"schedule_type\":\"at\",\"schedule_expr\":\"2099-05-23T01:10:00+08:00\",\"timezone\":\"Asia/Shanghai\",\"message\":\"提醒我睡觉\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n```"}
+	h := &fakeHarness{finalText: "```cron\n{\"action\":\"add\",\"job\":{\"name\":\"sleep reminder\",\"schedule\":{\"kind\":\"at\",\"at\":\"2099-05-23T01:10:00+08:00\"},\"sessionTarget\":\"isolated\",\"payload\":{\"kind\":\"agentTurn\",\"message\":\"提醒我睡觉\"},\"delivery\":{\"mode\":\"announce\",\"target\":\"origin\"}}}\n```"}
 	s := &fakeSender{}
 	rt := assistant.NewRuntime(assistant.RuntimeConfig{
 		AssistantID: "alpha",
@@ -535,12 +547,12 @@ func TestRuntimeExecutesHarnessCronToolCreate(t *testing.T) {
 	if !jobs[0].NextRunAt.Equal(wantNext) {
 		t.Fatalf("unexpected next run: got %s want %s", jobs[0].NextRunAt, wantNext)
 	}
-	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Cron job created") || strings.Contains(s.messages[0].Text, "acpa-cron") {
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "Cron job created") || strings.Contains(s.messages[0].Text, "```cron") {
 		t.Fatalf("expected cron tool confirmation without raw tool block, got %#v", s.messages)
 	}
 }
 
-func TestRuntimeNormalizesHarnessCronScheduleAliases(t *testing.T) {
+func TestRuntimeRejectsLegacyHarnessCronProtocol(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
@@ -574,42 +586,30 @@ func TestRuntimeNormalizesHarnessCronScheduleAliases(t *testing.T) {
 		MessageID:        "m1",
 		Text:             "请每1分钟提醒我一次站起来活动",
 	}
-	h.finalText = "```acpa-cron\n{\"action\":\"create\",\"name\":\"stand interval\",\"schedule_type\":\"interval\",\"schedule_expr\":\"1m\",\"timezone\":\"Asia/Shanghai\",\"message\":\"提醒用户站起来活动\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n```"
+	h.finalText = "```acpa-cron\n{\"action\":\"create\",\"name\":\"stand interval\",\"schedule_type\":\"every\",\"schedule_expr\":\"1m\",\"timezone\":\"Asia/Shanghai\",\"message\":\"提醒用户站起来活动\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n```"
 	if err := rt.HandleInbound(ctx, msg); err != nil {
-		t.Fatalf("interval alias cron tool create: %v", err)
+		t.Fatalf("legacy cron block should be relayed, not executed: %v", err)
 	}
-	msg.MessageID = "m2"
-	msg.Text = "1分钟后提醒我一次站起来活动"
-	h.finalText = "```acpa-cron\n{\"action\":\"create\",\"name\":\"stand once\",\"schedule_type\":\"at\",\"schedule_expr\":\"+1m\",\"timezone\":\"Asia/Shanghai\",\"message\":\"提醒用户站起来活动\",\"target\":\"isolated\",\"delivery\":\"origin\"}\n```"
-	before := time.Now().UTC()
-	if err := rt.HandleInbound(ctx, msg); err != nil {
-		t.Fatalf("relative at cron tool create: %v", err)
-	}
-	after := time.Now().UTC()
 	jobs, err := db.ListCronJobs(ctx, "alpha")
 	if err != nil {
 		t.Fatalf("list cron jobs: %v", err)
 	}
-	byName := map[string]model.CronJob{}
-	for _, job := range jobs {
-		byName[job.Name] = job
+	if len(jobs) != 0 || len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "acpa-cron") {
+		t.Fatalf("legacy acpa-cron block should be ordinary harness output, jobs=%#v messages=%#v", jobs, s.messages)
 	}
-	interval := byName["stand interval"]
-	if interval.ScheduleType != model.CronScheduleTypeEvery || interval.ScheduleExpr != "1m" {
-		t.Fatalf("expected interval alias to normalize to every 1m, got %#v", interval)
+
+	msg.MessageID = "m2"
+	msg.Text = "旧字段也应该失败"
+	h.finalText = "```cron\n{\"action\":\"add\",\"name\":\"legacy\",\"schedule_type\":\"every\",\"schedule_expr\":\"1m\",\"message\":\"legacy prompt\"}\n```"
+	if err := rt.HandleInbound(ctx, msg); err != nil {
+		t.Fatalf("legacy cron fields should be reported to sender: %v", err)
 	}
-	once := byName["stand once"]
-	if once.ScheduleType != model.CronScheduleTypeAt {
-		t.Fatalf("expected relative at job, got %#v", once)
+	jobs, err = db.ListCronJobs(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("list cron jobs after legacy fields: %v", err)
 	}
-	if once.ScheduleExpr == "+1m" {
-		t.Fatalf("relative at schedule should be stored as an absolute time, got %#v", once)
-	}
-	if _, err := time.Parse(time.RFC3339, once.ScheduleExpr); err != nil {
-		t.Fatalf("relative at schedule should be canonical RFC3339, got %q: %v", once.ScheduleExpr, err)
-	}
-	if once.NextRunAt.Before(before.Add(time.Minute)) || once.NextRunAt.After(after.Add(time.Minute+time.Second)) {
-		t.Fatalf("unexpected relative at next run: got %s between %s and %s", once.NextRunAt, before.Add(time.Minute), after.Add(time.Minute+time.Second))
+	if len(jobs) != 0 || len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Command failed") {
+		t.Fatalf("legacy fields should be rejected without creating jobs, jobs=%#v messages=%#v", jobs, s.messages)
 	}
 }
 
@@ -648,7 +648,7 @@ func TestRuntimeExecutesHarnessCronToolListAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create cron job: %v", err)
 	}
-	h := &fakeHarness{finalText: "```acpa-cron\n{\"action\":\"list\"}\n```"}
+	h := &fakeHarness{finalText: "```cron\n{\"action\":\"list\"}\n```"}
 	s := &fakeSender{}
 	rt := assistant.NewRuntime(assistant.RuntimeConfig{
 		AssistantID: "alpha",
@@ -666,17 +666,31 @@ func TestRuntimeExecutesHarnessCronToolListAndDelete(t *testing.T) {
 	if err := rt.HandleInbound(ctx, owner); err != nil {
 		t.Fatalf("harness cron tool list: %v", err)
 	}
-	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, job.ID) || strings.Contains(s.messages[0].Text, "acpa-cron") {
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, job.ID) || strings.Contains(s.messages[0].Text, "```cron") {
 		t.Fatalf("expected list response without raw tool block, got %#v", s.messages)
 	}
+	updateMsg := owner
+	updateMsg.MessageID = "m2"
+	updateMsg.Text = "暂停这个提醒"
+	h.finalText = "```cron\n{\"action\":\"update\",\"id\":\"" + job.ID + "\",\"patch\":{\"enabled\":false}}\n```"
+	if err := rt.HandleInbound(ctx, updateMsg); err != nil {
+		t.Fatalf("harness cron tool update: %v", err)
+	}
+	paused, err := db.CronJob(ctx, "alpha", job.ID)
+	if err != nil {
+		t.Fatalf("load paused job: %v", err)
+	}
+	if paused.Enabled || len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Cron job paused: "+job.ID) {
+		t.Fatalf("expected update to pause job, job=%#v messages=%#v", paused, s.messages)
+	}
 	deleteMsg := owner
-	deleteMsg.MessageID = "m2"
+	deleteMsg.MessageID = "m3"
 	deleteMsg.Text = "删除这个提醒"
-	h.finalText = "```acpa-cron\n{\"action\":\"delete\",\"job_id\":\"" + job.ID + "\"}\n```"
+	h.finalText = "```cron\n{\"action\":\"remove\",\"id\":\"" + job.ID + "\"}\n```"
 	if err := rt.HandleInbound(ctx, deleteMsg); err != nil {
 		t.Fatalf("harness cron tool delete: %v", err)
 	}
-	if len(s.messages) != 2 || !strings.Contains(s.messages[1].Text, "Cron job removed: "+job.ID) {
+	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, "Cron job removed: "+job.ID) {
 		t.Fatalf("expected delete confirmation, got %#v", s.messages)
 	}
 	jobs, err := db.ListCronJobs(ctx, "alpha")
@@ -933,10 +947,6 @@ func TestRuntimeSkillsCommandsReportSources(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "workspace")
 	writeTestSkill(t, filepath.Join(workspace, ".agents", "skills", "workspace-one"), "workspace-one", "Workspace skill")
-	writeTestSkill(t, filepath.Join(workspace, ".agents", "skills", "acpa-cron"), "acpa-cron", "Built-in cron")
-	if err := os.WriteFile(filepath.Join(workspace, ".agents", "skills", "acpa-cron", ".acpa-managed.json"), []byte(`{"managed_by":"acpa","provider":"codex","asset":"skill","name":"acpa-cron","version":"test","content_hash":"sha256:test"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	s := &fakeSender{}
 	rt := assistant.NewRuntime(assistant.RuntimeConfig{
 		AssistantID:   "alpha",
@@ -963,7 +973,7 @@ func TestRuntimeSkillsCommandsReportSources(t *testing.T) {
 	if err := rt.HandleInbound(ctx, user); err != nil {
 		t.Fatalf("skills: %v", err)
 	}
-	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "acpa-cron: Built-in cron") || !strings.Contains(s.messages[0].Text, "workspace-one: Workspace skill") || strings.Contains(s.messages[0].Text, "source:") {
+	if len(s.messages) != 1 || !strings.Contains(s.messages[0].Text, "workspace-one: Workspace skill") || strings.Contains(s.messages[0].Text, "acpa-cron") || strings.Contains(s.messages[0].Text, "source:") {
 		t.Fatalf("skills output should list names and descriptions only, got %#v", s.messages)
 	}
 	verboseDenied := user
@@ -982,7 +992,7 @@ func TestRuntimeSkillsCommandsReportSources(t *testing.T) {
 	if err := rt.HandleInbound(ctx, owner); err != nil {
 		t.Fatalf("skills verbose: %v", err)
 	}
-	if len(s.messages) != 3 || !strings.Contains(s.messages[2].Text, "built-in:") || !strings.Contains(s.messages[2].Text, "workspace:") || !strings.Contains(s.messages[2].Text, filepath.Join(workspace, ".agents", "skills", "workspace-one")) || strings.Contains(s.messages[2].Text, "overlay:") {
+	if len(s.messages) != 3 || strings.Contains(s.messages[2].Text, "built-in:") || !strings.Contains(s.messages[2].Text, "workspace:") || !strings.Contains(s.messages[2].Text, filepath.Join(workspace, ".agents", "skills", "workspace-one")) || strings.Contains(s.messages[2].Text, "overlay:") {
 		t.Fatalf("verbose skills should include source layers and paths, got %#v", s.messages)
 	}
 }
