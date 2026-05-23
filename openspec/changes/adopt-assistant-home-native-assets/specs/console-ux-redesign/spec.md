@@ -27,7 +27,7 @@ The Web console SHALL use sheets or modal panels for setup and detail workflows 
 
 #### Scenario: Configuring Feishu
 - **WHEN** the user opens Feishu setup
-- **THEN** the console SHALL open a sheet with a choice between QR onboarding and manual existing-app credentials
+- **THEN** the console SHALL open a sheet with a choice between New Feishu Bot setup and manual existing-app credentials
 
 #### Scenario: Confirming lifecycle actions
 - **WHEN** the user triggers stop, restart, or another disruptive assistant action

@@ -638,7 +638,7 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 	displayName := fs.String("name", "", "display name")
 	setupURL := fs.String("setup-url", "", "setup URL")
 	domain := fs.String("domain", "feishu", "Feishu/Lark domain: feishu or lark")
-	manual := fs.Bool("manual", false, "skip QR registration and use explicit credential flags")
+	manual := fs.Bool("manual", false, "skip new Feishu bot setup and use explicit credential flags")
 	appIDEnv := fs.String("app-id-env", "", "app id env var")
 	appSecretEnv := fs.String("app-secret-env", "", "app secret env var")
 	appIDFile := fs.String("app-id-file", "", "app id file")
@@ -646,7 +646,7 @@ func channelAdd(ctx context.Context, platformRaw string, args []string, stdin io
 	websocketURL := fs.String("websocket-url", "", "gateway websocket URL")
 	registrationBaseURL := fs.String("registration-base-url", "", "override Feishu accounts base URL")
 	openBaseURL := fs.String("open-base-url", "", "override Feishu open platform base URL")
-	onboardingTimeout := fs.Int("onboarding-timeout", 600, "QR onboarding timeout seconds")
+	onboardingTimeout := fs.Int("onboarding-timeout", 600, "new Feishu bot setup timeout seconds")
 	enabled := fs.Bool("enabled", true, "enable channel")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -745,11 +745,8 @@ func runFeishuQRRegistration(ctx context.Context, domain, registrationBaseURL, o
 	if err != nil {
 		return im.FeishuRegistrationResult{}, err
 	}
-	fmt.Fprintln(stdout, "Scan the QR code with Feishu to create and configure the bot app.")
+	fmt.Fprintln(stdout, "Open the Feishu setup link to create and configure the bot app.")
 	if begin.QRURL != "" {
-		if code, err := qrcode.New(begin.QRURL, qrcode.Medium); err == nil {
-			fmt.Fprintln(stdout, code.ToString(false))
-		}
 		fmt.Fprintf(stdout, "URL: %s\n", begin.QRURL)
 	}
 	if begin.UserCode != "" {

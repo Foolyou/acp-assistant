@@ -175,10 +175,10 @@ func TestFeishuChannelAddCanUseQRRegistrationWithoutManualWebsocketURL(t *testin
 		"--open-base-url", server.URL,
 		"--onboarding-timeout", "5",
 	}, strings.NewReader(""), &out, &out); err != nil {
-		t.Fatalf("channel add feishu qr: %v\noutput:\n%s", err, out.String())
+		t.Fatalf("channel add new Feishu bot: %v\noutput:\n%s", err, out.String())
 	}
-	if !strings.Contains(out.String(), "Scan the QR code") || !strings.Contains(out.String(), "ABCD-EFGH") {
-		t.Fatalf("expected QR onboarding output, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "Open the Feishu setup link") || !strings.Contains(out.String(), "ABCD-EFGH") {
+		t.Fatalf("expected new Feishu bot setup output, got:\n%s", out.String())
 	}
 	channels, err := configspace.LoadChannels(configDir)
 	if err != nil {
@@ -189,7 +189,7 @@ func TestFeishuChannelAddCanUseQRRegistrationWithoutManualWebsocketURL(t *testin
 	}
 	channel := channels[0]
 	if _, ok := channel.Credentials["websocket_url"]; ok {
-		t.Fatalf("websocket_url should not be required in QR onboarding config: %#v", channel.Credentials)
+		t.Fatalf("websocket_url should not be required in new bot config: %#v", channel.Credentials)
 	}
 	if channel.Credentials["app_id"].Type != model.SecretFile || channel.Credentials["app_secret"].Type != model.SecretFile {
 		t.Fatalf("expected file-backed app credentials: %#v", channel.Credentials)

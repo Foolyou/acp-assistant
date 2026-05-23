@@ -34,7 +34,7 @@ test("console create sheet and doctor entry are reachable", async ({ page }) => 
   await expect(page.getByRole("button", { name: "Doctor" }).first()).toBeVisible();
 });
 
-test("feishu qr setup polls and saves automatically", async ({ page }) => {
+test("new Feishu bot setup polls and saves automatically", async ({ page }) => {
   let completeCalls = 0;
   await page.route("**/api/setup/feishu/qr/begin", async (route) => {
     await route.fulfill({
@@ -75,7 +75,7 @@ test("feishu qr setup polls and saves automatically", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(consoleURL, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Feishu" }).first().click();
-  await page.getByRole("button", { name: "Start QR Setup" }).click();
+  await page.getByRole("button", { name: "Create New Feishu Bot" }).click();
 
   await expect(page.getByRole("link", { name: "Open Feishu setup" })).toBeVisible();
   await expect(page.locator(".code-box strong")).toHaveText("ABCD-EFGH");

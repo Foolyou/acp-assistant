@@ -10,7 +10,7 @@ const required = [
   "id=\"root\"",
   "<style>",
   "<script>",
-  "Start QR Setup",
+  "New Feishu Bot",
   "Run Doctor",
 ];
 

@@ -102,15 +102,14 @@ The Web console SHALL provide an assistant setup flow.
 - **THEN** the system SHALL create them under the default ACPA assistant root layout
 
 ### Requirement: Web Feishu setup
-The Web console SHALL support Feishu setup through QR onboarding and manual existing-app credentials.
+The Web console SHALL support Feishu setup through New Feishu Bot setup and manual existing-app credentials.
 
-#### Scenario: QR onboarding setup
-- **WHEN** a user selects QR onboarding in the Web console
+#### Scenario: New Feishu Bot setup
+- **WHEN** a user selects New Feishu Bot in the Web console
 - **THEN** the system SHALL start Feishu registration
-- **AND** the Web console SHALL show the QR URL or code and registration status until credentials are stored or the flow fails
+- **AND** the Web console SHALL show the setup URL, user code when available, and registration status until credentials are stored or the flow fails
 
 #### Scenario: Manual app setup
 - **WHEN** a user enters existing Feishu app credentials manually
 - **THEN** the system SHALL store the credentials as assistant configspace secrets
 - **AND** it SHALL create the Feishu channel configuration using those secrets
-

@@ -37,7 +37,7 @@ The CLI SHALL show setup links and terminal QR codes during channel onboarding w
 - **THEN** the CLI MUST print the URL
 - **AND** it MUST render a terminal QR code for the same URL
 
-#### Scenario: QR onboarding is unavailable
+#### Scenario: Setup URL onboarding is unavailable
 - **WHEN** the selected platform or current environment cannot provide a usable setup or pairing URL
 - **THEN** the CLI MUST continue with a manual credential fallback
 - **AND** it MUST explain which credential values are required
@@ -52,4 +52,3 @@ The system SHALL provide status and log commands that work from configspace and 
 #### Scenario: User follows logs
 - **WHEN** the user runs `acpa logs --follow`
 - **THEN** the CLI MUST stream assistant, connector, ACP runtime, session, permission, and error events from the assistant event index
-

@@ -442,7 +442,7 @@ function FeishuSetup({ assistant, onDone, onError }) {
         setStatus("Feishu app saved and assistant restarted.");
       } else {
         if (!qrBegin) {
-          setStatus("Starting QR registration...");
+          setStatus("Starting Feishu bot setup...");
           const begin = await api("setup/feishu/qr/begin", { method: "POST", body: JSON.stringify(payload) });
           const qrURL = begin.QRURL || begin.qr_url;
           const userCode = begin.UserCode || begin.user_code;
@@ -502,7 +502,7 @@ function FeishuSetup({ assistant, onDone, onError }) {
     }
     if (pollRun.current === run) {
       setPolling(false);
-      setStatus("Feishu approval expired. Start QR setup again.");
+      setStatus("Feishu approval expired. Start the New Feishu Bot flow again.");
     }
   }
 
@@ -513,12 +513,12 @@ function FeishuSetup({ assistant, onDone, onError }) {
   const qrURL = qrBegin?.QRURL || qrBegin?.qr_url;
   const userCode = qrBegin?.UserCode || qrBegin?.user_code;
   const expiresIn = qrBegin?.ExpireIn || qrBegin?.expire_in;
-  const qrButtonLabel = qrBegin ? "Waiting for Approval" : "Start QR Setup";
+  const newBotButtonLabel = qrBegin ? "Waiting for Approval" : "Create New Feishu Bot";
 
   return (
     <form className="sheet-form" onSubmit={submit}>
       <div className="segmented" role="tablist" aria-label="Feishu setup mode">
-        <button type="button" className={mode === "qr" ? "active" : ""} onClick={() => setMode("qr")}>QR onboarding</button>
+        <button type="button" className={mode === "qr" ? "active" : ""} onClick={() => setMode("qr")}>New Feishu Bot</button>
         <button type="button" className={mode === "manual" ? "active" : ""} onClick={() => setMode("manual")}>Existing app</button>
       </div>
       <label>Channel ID<input name="channel_id" defaultValue="feishu-main" /></label>
@@ -537,7 +537,7 @@ function FeishuSetup({ assistant, onDone, onError }) {
           <button type="button" className="link-button" onClick={() => { pollRun.current += 1; setPolling(false); setQRBegin(null); setStatus(""); }}>Start over</button>
         </div>
       )}
-      <button className="primary wide" type="submit" disabled={saving || polling || (mode === "qr" && !!qrBegin)}>{saving || polling ? "Working..." : mode === "qr" ? qrButtonLabel : "Save Feishu App"}</button>
+      <button className="primary wide" type="submit" disabled={saving || polling || (mode === "qr" && !!qrBegin)}>{saving || polling ? "Working..." : mode === "qr" ? newBotButtonLabel : "Save Feishu App"}</button>
       {status && <pre className="progress-box">{status}</pre>}
     </form>
   );

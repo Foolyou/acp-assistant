@@ -41,8 +41,8 @@ func TestServerStatusWritesMetadataAndServesConsole(t *testing.T) {
 		t.Fatalf("console status: %s", res.Status)
 	}
 	body, _ := io.ReadAll(res.Body)
-	if !strings.Contains(string(body), "Start QR Setup") || !strings.Contains(string(body), "Run Doctor") {
-		t.Fatalf("console should expose Feishu QR setup flow")
+	if !strings.Contains(string(body), "New Feishu Bot") || !strings.Contains(string(body), "Run Doctor") {
+		t.Fatalf("console should expose New Feishu Bot setup flow")
 	}
 	cancel()
 	if err := <-errCh; err != nil {

@@ -41,18 +41,18 @@ The Web console SHALL use sheets or modal panels for setup and detail workflows 
 
 #### Scenario: Configuring Feishu
 - **WHEN** the user opens Feishu setup
-- **THEN** the console SHALL open a sheet with a choice between QR onboarding and manual existing-app credentials
+- **THEN** the console SHALL open a sheet with a choice between New Feishu Bot setup and manual existing-app credentials
 
 #### Scenario: Confirming lifecycle actions
 - **WHEN** the user triggers stop, restart, or another disruptive assistant action
 - **THEN** the console SHALL present a confirmation sheet or modal that explains the action before submitting it
 
 ### Requirement: Feishu setup UX
-The Web console SHALL provide clear Feishu setup flows for QR onboarding and manual app credentials.
+The Web console SHALL provide clear Feishu setup flows for creating a new Feishu bot and manual app credentials.
 
-#### Scenario: QR onboarding
-- **WHEN** QR onboarding starts successfully
-- **THEN** the console SHALL show the scan URL or code, user code when available, and registration progress until credentials are stored or the flow fails
+#### Scenario: New Feishu Bot setup
+- **WHEN** New Feishu Bot setup starts successfully
+- **THEN** the console SHALL show the setup URL, user code when available, and registration progress until credentials are stored or the flow fails
 
 #### Scenario: Manual existing app setup
 - **WHEN** manual setup is selected
@@ -122,4 +122,3 @@ The implementation SHALL include verification for the redesigned console.
 #### Scenario: Browser smoke verification
 - **WHEN** implementation is complete
 - **THEN** the console SHALL be smoke-tested at mobile and desktop viewport widths to check for blank screens, horizontal overflow, and broken primary interactions
-
